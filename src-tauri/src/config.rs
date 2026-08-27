@@ -64,6 +64,21 @@ impl Config {
         ModelPaths::parakeet_int8(self.recognizer_dir())
     }
 
+    /// The speaker-embedding model. NeMo TitaNet small was measured to be the
+    /// clear winner over the CAM++ variants — see docs/speaker-identification.md.
+    pub fn speaker_model(&self) -> PathBuf {
+        self.models_dir.join("nemo_en_titanet_small.onnx")
+    }
+
+    /// Identifies which model produced a stored embedding. Embeddings from
+    /// different models are not comparable, so they are never mixed.
+    pub fn speaker_model_id(&self) -> String {
+        self.speaker_model()
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "speaker-model".into())
+    }
+
     /// What is missing before a meeting can be transcribed.
     ///
     /// Reported in the readiness panel alongside the capture streams, because
@@ -73,6 +88,9 @@ impl Config {
         let mut missing = Vec::new();
         if !self.silero().is_file() {
             missing.push("silero_vad.onnx".into());
+        }
+        if !self.speaker_model().is_file() {
+            missing.push("nemo_en_titanet_small.onnx".into());
         }
         if self.recognizer().verify().is_err() {
             missing.push(

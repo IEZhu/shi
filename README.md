@@ -16,13 +16,13 @@ diarization, which removes half the hard problem before a model runs.
 |---|---|
 | M0 — capture + readiness panel | done |
 | M1 — transcription, storage, live transcript, echo suppression | done |
-| M2 — diarization and voice profiles | next |
-| M3 — model manager, retention, hotword glossary | |
+| M2 — diarization and persistent voice profiles | done |
+| M3 — model manager, retention, hotword glossary | next |
 | M4 — Windows and Linux ports | |
 
 Meetings transcribe end to end and are written to Markdown as they happen.
-Speakers are attributed by stream — the microphone is you, the system output is
-everyone else — until diarization arrives in M2 and splits the second one.
+Remote participants are separated by voice; name one and the whole transcript
+updates, and the same person is recognised automatically in later meetings.
 
 ## Requirements
 
@@ -76,7 +76,8 @@ into a rewrite instead of one new `AudioSource`.
 ```
 crates/audio/        AudioSource trait, ring buffers, mic (cpal), WAV FileSource
 crates/audio/objc/   Core Audio process-tap shim (macOS)
-crates/pipeline/     resampling, VAD, recognition, draft cadence, echo suppression
+crates/pipeline/     resampling, VAD, recognition, draft cadence, echo suppression,
+                     speaker tracking
 crates/store/        SQLite schema and the Markdown projection
 src-tauri/           app shell, session orchestration, commands
 ui/                  React frontend

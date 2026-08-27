@@ -6,9 +6,10 @@ use std::time::Duration;
 use serde::Serialize;
 use shi_audio::{StreamHandle, StreamKind};
 use shi_pipeline::{
-    EchoReference, PipelineEvent, SherpaTranscriber, StreamPipeline, Transcriber, VadSettings,
+    Attribution, EchoReference, PipelineEvent, SherpaTranscriber, SpeakerTracker,
+    StreamPipeline, Thresholds, Transcriber, VadSettings, VoiceProfile,
 };
-use shi_store::{NewSegment, Store, markdown};
+use shi_store::{NewSegment, SessionSlot, Store, markdown};
 use tauri::{AppHandle, Emitter};
 
 use crate::capture::{Capture, Readiness, StreamStatus, StartedStreams, READINESS_EVENT};
@@ -41,9 +42,15 @@ pub enum TranscriptEvent {
         stream: String,
         start_ms: i64,
         end_ms: i64,
+        /// Resolved name, when the voice is known.
         speaker: Option<String>,
+        /// Unnamed voice within this meeting, shown as "Спикер N".
+        slot: Option<u32>,
         text: String,
     },
+    /// A voice nobody has named yet has just been heard for the first time.
+    /// The UI offers to name it without interrupting the transcript.
+    SpeakerDiscovered { slot: u32 },
     /// An utterance ended without text, so drop the draft on screen.
     DraftAbandoned { stream: String },
 }
@@ -123,7 +130,20 @@ impl Session {
         }
 
         let streams = self.capture.start();
+        for stream in [&streams.mic, &streams.system] {
+            if let Err(status) = stream {
+                tracing::error!(
+                    stream = %status.kind,
+                    "capture source refused to start: {}",
+                    status.error.as_deref().unwrap_or("no reason given")
+                );
+            }
+        }
+
         if !streams.any_running() {
+            // Silence here would leave a headless run with nothing to explain
+            // why a meeting never happened.
+            tracing::error!("no capture stream started; the meeting cannot begin");
             let readiness = self.compose_idle_readiness(&streams);
             self.set_readiness(readiness.clone());
             self.capture.stop();
@@ -174,7 +194,8 @@ impl Session {
             }
         }
 
-        self.workers.push(self.spawn_meter(app, meters, meeting_id.is_some(), pipeline_stats));
+        self.workers
+            .push(self.spawn_meter(app, meters, meeting_id, pipeline_stats));
         lock(&self.state).meeting_id = meeting_id;
 
         Ok(self.readiness())
@@ -213,7 +234,16 @@ impl Session {
                 // The system stream is the reference; the microphone is what
                 // gets contaminated by it.
                 match kind {
-                    StreamKind::System => pipeline.publish_echo_reference(echo),
+                    StreamKind::System => {
+                        pipeline.publish_echo_reference(echo);
+                        // Only this stream carries several people, so only it
+                        // needs a tracker. That asymmetry is the payoff for
+                        // capturing the two sources separately.
+                        match build_tracker(&config, &store) {
+                            Ok(tracker) => pipeline.identify_speakers(tracker),
+                            Err(err) => tracing::error!("speaker tracking disabled: {err}"),
+                        }
+                    }
                     StreamKind::Mic => pipeline.suppress_echo_of(echo),
                 }
                 Some(pipeline)
@@ -260,8 +290,9 @@ impl Session {
                 // rendered meeting is a few tens of kilobytes, and the
                 // alternative is a file that trails the transcript by however
                 // long the timer happens to be when the process dies.
-                if emit_events(&app, &store, &config, meeting_id, events) {
+                if emit_events(&app, &store, meeting_id, events) {
                     if let Some(id) = meeting_id {
+                        persist_slots(&store, &config, id, pipeline.speaker_slots());
                         render_markdown(&store, &config, id);
                     }
                 }
@@ -270,8 +301,9 @@ impl Session {
             // Closing time: whatever speech is still buffered is still speech.
             if let Some(pipeline) = pipeline.as_mut() {
                 let events = pipeline.flush();
-                if emit_events(&app, &store, &config, meeting_id, events) {
+                if emit_events(&app, &store, meeting_id, events) {
                     if let Some(id) = meeting_id {
+                        persist_slots(&store, &config, id, pipeline.speaker_slots());
                         render_markdown(&store, &config, id);
                     }
                 }
@@ -284,7 +316,7 @@ impl Session {
         &self,
         app: AppHandle,
         meters: Vec<Result<(shi_audio::SourceInfo, Arc<shi_audio::StreamStats>), StreamStatus>>,
-        recording: bool,
+        meeting_id: Option<i64>,
         stats: SharedStats,
     ) -> JoinHandle<()> {
         let stop = Arc::clone(&self.stop);
@@ -310,7 +342,8 @@ impl Session {
                     mic,
                     system,
                     missing_models: missing.clone(),
-                    recording,
+                    recording: meeting_id.is_some(),
+                    meeting_id,
                     rtf: sampled.rtf,
                     echo_suppressed: sampled.echo_suppressed,
                 };
@@ -357,7 +390,8 @@ impl Session {
             render_markdown(&self.store, &self.config, id);
         }
 
-        let readiness = Readiness::idle(self.config.missing_models());
+        let mut readiness = Readiness::idle(self.config.missing_models());
+        readiness.meeting_id = meeting_id;
         self.set_readiness(readiness.clone());
         readiness
     }
@@ -401,7 +435,6 @@ impl Drop for Session {
 fn emit_events(
     app: &AppHandle,
     store: &Arc<Mutex<Store>>,
-    config: &Config,
     meeting_id: Option<i64>,
     events: Vec<PipelineEvent>,
 ) -> bool {
@@ -428,18 +461,28 @@ fn emit_events(
                 start,
                 end,
                 text,
+                speaker,
                 ..
             } => {
+                // Attribution is stored as a reference, never a copied name:
+                // renaming someone later has to fix every line at once.
+                let (speaker_id, slot, name, discovered) = match &speaker {
+                    Some(Attribution::Known { speaker_id, name }) => {
+                        (Some(*speaker_id), None, Some(name.clone()), None)
+                    }
+                    Some(Attribution::Slot { id, is_new }) => {
+                        (None, Some(*id), None, is_new.then_some(*id))
+                    }
+                    Some(Attribution::Continuation { id }) => (None, Some(*id), None, None),
+                    Some(Attribution::Unknown) | None => (None, None, None, None),
+                };
+
                 let segment = NewSegment {
                     stream,
                     start_ms: start.as_millis() as i64,
                     end_ms: end.as_millis() as i64,
-                    // Microphone audio is the local participant by
-                    // construction; the system stream waits for diarization.
-                    speaker: match stream {
-                        StreamKind::Mic => Some(config.markdown().unnamed_mic.clone()),
-                        StreamKind::System => None,
-                    },
+                    speaker_id,
+                    session_slot: slot,
                     text: text.clone(),
                 };
 
@@ -455,12 +498,21 @@ fn emit_events(
                 };
                 stored = true;
 
+                if let Some(slot) = discovered
+                    && app
+                        .emit(TRANSCRIPT_EVENT, &TranscriptEvent::SpeakerDiscovered { slot })
+                        .is_err()
+                {
+                    return stored;
+                }
+
                 TranscriptEvent::Final {
                     id,
                     stream: stream.as_str().into(),
                     start_ms: segment.start_ms,
                     end_ms: segment.end_ms,
-                    speaker: segment.speaker,
+                    speaker: name,
+                    slot,
                     text,
                 }
             }
@@ -472,6 +524,59 @@ fn emit_events(
     }
 
     stored
+}
+
+/// Build a tracker preloaded with every voice the user has already named.
+fn build_tracker(config: &Config, store: &Arc<Mutex<Store>>) -> Result<SpeakerTracker, AppError> {
+    let model_id = config.speaker_model_id();
+    let mut tracker = SpeakerTracker::new(
+        &config.speaker_model().to_string_lossy(),
+        config.asr_threads,
+        Thresholds::default(),
+    )?;
+
+    let voices = lock(store).voices_for_model(&model_id)?;
+    let count = voices.len();
+    tracker.load_profiles(
+        voices
+            .into_iter()
+            .map(|voice| VoiceProfile {
+                speaker_id: voice.speaker_id,
+                name: voice.display_name,
+                embeddings: voice.embeddings,
+            })
+            .collect(),
+    );
+    tracing::info!(known_voices = count, "speaker tracking ready");
+
+    Ok(tracker)
+}
+
+/// Keep the stored voices in step with what the tracker has heard, so naming
+/// one after the meeting has a centroid to turn into a voiceprint.
+fn persist_slots(
+    store: &Arc<Mutex<Store>>,
+    config: &Config,
+    meeting_id: i64,
+    slots: &[shi_pipeline::SessionSlot],
+) {
+    let model_id = config.speaker_model_id();
+    let store = lock(store);
+    for slot in slots {
+        let row = SessionSlot {
+            meeting_id,
+            slot: slot.id,
+            centroid: slot.centroid().to_vec(),
+            model_id: model_id.clone(),
+            sample_path: None,
+            total_speech_ms: slot.total_speech.as_millis() as i64,
+            utterances: slot.utterances,
+            resolved_speaker_id: None,
+        };
+        if let Err(err) = store.upsert_session_slot(&row) {
+            tracing::error!("cannot store speaker slot {}: {err}", slot.id);
+        }
+    }
 }
 
 /// Re-render the whole file from the database. Never appended to, so a speaker

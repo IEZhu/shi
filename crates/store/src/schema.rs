@@ -3,10 +3,6 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// Applied in order; each step runs once and is recorded by `user_version`.
-///
-/// The speaker and voiceprint tables deliberately do not exist yet. They arrive
-/// with diarization in M2, as their own migration, so the migration path is
-/// exercised rather than assumed to work.
 const MIGRATIONS: &[&str] = &[
     // 1 — meetings and their transcript segments
     r#"
@@ -29,12 +25,60 @@ const MIGRATIONS: &[&str] = &[
         stream      TEXT    NOT NULL CHECK (stream IN ('mic', 'system')),
         t_start_ms  INTEGER NOT NULL,
         t_end_ms    INTEGER NOT NULL,
-        -- Resolved speaker name once known; NULL means "not yet identified".
+        -- Superseded by speaker_id in migration 2.
         speaker     TEXT,
         text        TEXT    NOT NULL
     );
 
     CREATE INDEX segments_by_time ON segments (meeting_id, t_start_ms);
+    "#,
+    // 2 — identified voices
+    //
+    // A segment points at a person or at an unnamed voice in this meeting, and
+    // the *name* is resolved when the transcript is rendered. Storing the name
+    // on the segment instead would mean renaming someone had to rewrite every
+    // line they ever spoke; this way it is one row.
+    r#"
+    CREATE TABLE speakers (
+        id           INTEGER PRIMARY KEY,
+        display_name TEXT    NOT NULL UNIQUE,
+        created_at   TEXT    NOT NULL,
+        notes        TEXT
+    );
+
+    -- Several per person on purpose: the same voice on AirPods and in a
+    -- meeting room lands in different places, and matching takes the best of
+    -- them rather than an average that resembles neither.
+    CREATE TABLE voiceprints (
+        id                INTEGER PRIMARY KEY,
+        speaker_id        INTEGER NOT NULL REFERENCES speakers(id) ON DELETE CASCADE,
+        embedding         BLOB    NOT NULL,
+        dim               INTEGER NOT NULL,
+        model_id          TEXT    NOT NULL,
+        source_meeting_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
+        duration_ms       INTEGER NOT NULL,
+        created_at        TEXT    NOT NULL
+    );
+
+    CREATE INDEX voiceprints_by_speaker ON voiceprints (speaker_id);
+
+    -- An unnamed voice within one meeting, waiting to be given a name.
+    CREATE TABLE session_slots (
+        meeting_id          INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        slot                INTEGER NOT NULL,
+        centroid            BLOB    NOT NULL,
+        dim                 INTEGER NOT NULL,
+        model_id            TEXT    NOT NULL,
+        sample_path         TEXT,
+        total_speech_ms     INTEGER NOT NULL DEFAULT 0,
+        utterances          INTEGER NOT NULL DEFAULT 0,
+        resolved_speaker_id INTEGER REFERENCES speakers(id) ON DELETE SET NULL,
+        PRIMARY KEY (meeting_id, slot)
+    );
+
+    ALTER TABLE segments ADD COLUMN speaker_id INTEGER REFERENCES speakers(id) ON DELETE SET NULL;
+    ALTER TABLE segments ADD COLUMN session_slot INTEGER;
+    ALTER TABLE segments DROP COLUMN speaker;
     "#,
 ];
 

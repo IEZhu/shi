@@ -1,10 +1,13 @@
 use std::path::Path;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use shi_audio::StreamKind;
 
 use crate::error::{Result, StoreError};
-use crate::model::{Meeting, NewSegment, Segment};
+use crate::model::{
+    Meeting, NewSegment, Segment, SessionSlot, Speaker, SpeakerVoice, blob_to_embedding,
+    embedding_to_blob,
+};
 use crate::schema;
 
 /// The transcript database.
@@ -106,14 +109,16 @@ impl Store {
     /// costs at most the utterance still being spoken.
     pub fn append_segment(&self, meeting_id: i64, segment: &NewSegment) -> Result<i64> {
         self.connection.execute(
-            "INSERT INTO segments (meeting_id, stream, t_start_ms, t_end_ms, speaker, text)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO segments
+                (meeting_id, stream, t_start_ms, t_end_ms, speaker_id, session_slot, text)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 meeting_id,
                 segment.stream.as_str(),
                 segment.start_ms,
                 segment.end_ms,
-                segment.speaker,
+                segment.speaker_id,
+                segment.session_slot,
                 segment.text,
             ],
         )?;
@@ -126,9 +131,12 @@ impl Store {
     /// and a system-audio utterance become one conversation.
     pub fn segments(&self, meeting_id: i64) -> Result<Vec<Segment>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, stream, t_start_ms, t_end_ms, speaker, text
-             FROM segments WHERE meeting_id = ?1
-             ORDER BY t_start_ms, id",
+            "SELECT s.id, s.stream, s.t_start_ms, s.t_end_ms,
+                    s.speaker_id, p.display_name, s.session_slot, s.text
+             FROM segments s
+             LEFT JOIN speakers p ON p.id = s.speaker_id
+             WHERE s.meeting_id = ?1
+             ORDER BY s.t_start_ms, s.id",
         )?;
         let rows = statement.query_map(params![meeting_id], |row| {
             let stream: String = row.get(1)?;
@@ -141,34 +149,252 @@ impl Store {
                 },
                 start_ms: row.get(2)?,
                 end_ms: row.get(3)?,
-                speaker: row.get(4)?,
-                text: row.get(5)?,
+                speaker_id: row.get(4)?,
+                speaker_name: row.get(5)?,
+                session_slot: row.get(6)?,
+                text: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Give every segment currently attributed to `from` the name `to`.
-    ///
-    /// This is the whole point of keeping Markdown as a projection: naming a
-    /// voice after the meeting fixes the entire transcript in one statement.
-    /// Passing `None` for `from` claims the not-yet-identified segments.
-    pub fn rename_speaker(
-        &self,
-        meeting_id: i64,
-        from: Option<&str>,
-        to: &str,
-    ) -> Result<usize> {
-        let changed = match from {
-            Some(from) => self.connection.execute(
-                "UPDATE segments SET speaker = ?3 WHERE meeting_id = ?1 AND speaker = ?2",
-                params![meeting_id, from, to],
-            )?,
-            None => self.connection.execute(
-                "UPDATE segments SET speaker = ?2 WHERE meeting_id = ?1 AND speaker IS NULL",
-                params![meeting_id, to],
-            )?,
-        };
-        Ok(changed)
+    // ---- speakers -------------------------------------------------------
+
+    /// Find or create a person by name.
+    pub fn speaker_named(&self, display_name: &str, now: &str) -> Result<Speaker> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO speakers (display_name, created_at) VALUES (?1, ?2)",
+            params![display_name, now],
+        )?;
+        Ok(self.connection.query_row(
+            "SELECT id, display_name, created_at, notes FROM speakers WHERE display_name = ?1",
+            params![display_name],
+            speaker_from_row,
+        )?)
     }
+
+    pub fn speakers(&self) -> Result<Vec<Speaker>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, display_name, created_at, notes FROM speakers ORDER BY display_name",
+        )?;
+        let rows = statement.query_map([], speaker_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Rename someone.
+    ///
+    /// One row, and every transcript they ever appeared in is correct the next
+    /// time it renders. This is what storing a reference rather than a copied
+    /// name buys.
+    pub fn rename_speaker(&self, speaker_id: i64, display_name: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE speakers SET display_name = ?2 WHERE id = ?1",
+            params![speaker_id, display_name],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a person and every voiceprint of them.
+    ///
+    /// Segments that pointed at them fall back to their session slot, so the
+    /// transcript reverts to "Спикер N" rather than losing the attribution
+    /// altogether — the app still knows those lines were one voice.
+    pub fn forget_speaker(&self, speaker_id: i64) -> Result<()> {
+        // ON DELETE CASCADE clears voiceprints; the segment and slot columns
+        // are ON DELETE SET NULL.
+        self.connection.execute(
+            "DELETE FROM speakers WHERE id = ?1",
+            params![speaker_id],
+        )?;
+        Ok(())
+    }
+
+    // ---- voiceprints ----------------------------------------------------
+
+    pub fn add_voiceprint(
+        &self,
+        speaker_id: i64,
+        embedding: &[f32],
+        model_id: &str,
+        source_meeting_id: Option<i64>,
+        duration_ms: i64,
+        now: &str,
+    ) -> Result<i64> {
+        self.connection.execute(
+            "INSERT INTO voiceprints
+                (speaker_id, embedding, dim, model_id, source_meeting_id, duration_ms, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                speaker_id,
+                embedding_to_blob(embedding),
+                embedding.len() as i64,
+                model_id,
+                source_meeting_id,
+                duration_ms,
+                now,
+            ],
+        )?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    /// Every named voice recorded with `model_id`, ready for matching.
+    ///
+    /// Filtered by model because embeddings from different models are not
+    /// comparable: cosine similarity between them is noise, not evidence.
+    pub fn voices_for_model(&self, model_id: &str) -> Result<Vec<SpeakerVoice>> {
+        let mut statement = self.connection.prepare(
+            "SELECT s.id, s.display_name, v.embedding
+             FROM speakers s
+             JOIN voiceprints v ON v.speaker_id = s.id
+             WHERE v.model_id = ?1
+             ORDER BY s.id",
+        )?;
+
+        let mut voices: Vec<SpeakerVoice> = Vec::new();
+        let rows = statement.query_map(params![model_id], |row| {
+            let id: i64 = row.get(0)?;
+            let name: String = row.get(1)?;
+            let blob: Vec<u8> = row.get(2)?;
+            Ok((id, name, blob_to_embedding(&blob)))
+        })?;
+
+        for row in rows {
+            let (id, name, embedding) = row?;
+            match voices.last_mut() {
+                Some(voice) if voice.speaker_id == id => voice.embeddings.push(embedding),
+                _ => voices.push(SpeakerVoice {
+                    speaker_id: id,
+                    display_name: name,
+                    embeddings: vec![embedding],
+                }),
+            }
+        }
+        Ok(voices)
+    }
+
+    // ---- session slots --------------------------------------------------
+
+    /// Record or update an unnamed voice heard in this meeting.
+    pub fn upsert_session_slot(&self, slot: &SessionSlot) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO session_slots
+                (meeting_id, slot, centroid, dim, model_id, sample_path,
+                 total_speech_ms, utterances)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (meeting_id, slot) DO UPDATE SET
+                centroid = excluded.centroid,
+                total_speech_ms = excluded.total_speech_ms,
+                utterances = excluded.utterances,
+                sample_path = COALESCE(excluded.sample_path, session_slots.sample_path)",
+            params![
+                slot.meeting_id,
+                slot.slot,
+                embedding_to_blob(&slot.centroid),
+                slot.centroid.len() as i64,
+                slot.model_id,
+                slot.sample_path,
+                slot.total_speech_ms,
+                slot.utterances,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_slots(&self, meeting_id: i64) -> Result<Vec<SessionSlot>> {
+        let mut statement = self.connection.prepare(
+            "SELECT meeting_id, slot, centroid, model_id, sample_path,
+                    total_speech_ms, utterances, resolved_speaker_id
+             FROM session_slots WHERE meeting_id = ?1 ORDER BY slot",
+        )?;
+        let rows = statement.query_map(params![meeting_id], |row| {
+            let blob: Vec<u8> = row.get(2)?;
+            Ok(SessionSlot {
+                meeting_id: row.get(0)?,
+                slot: row.get(1)?,
+                centroid: blob_to_embedding(&blob),
+                model_id: row.get(3)?,
+                sample_path: row.get(4)?,
+                total_speech_ms: row.get(5)?,
+                utterances: row.get(6)?,
+                resolved_speaker_id: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Give an unnamed voice a name.
+    ///
+    /// Claims every segment of that slot, stores the slot centroid as a
+    /// voiceprint so the person is recognised in future meetings, and marks
+    /// the slot resolved — all in one transaction, because a half-applied
+    /// naming would leave the transcript disagreeing with itself.
+    pub fn name_session_slot(
+        &mut self,
+        meeting_id: i64,
+        slot: u32,
+        display_name: &str,
+        now: &str,
+    ) -> Result<Speaker> {
+        let transaction = self.connection.transaction()?;
+
+        transaction.execute(
+            "INSERT OR IGNORE INTO speakers (display_name, created_at) VALUES (?1, ?2)",
+            params![display_name, now],
+        )?;
+        let speaker: Speaker = transaction.query_row(
+            "SELECT id, display_name, created_at, notes FROM speakers WHERE display_name = ?1",
+            params![display_name],
+            speaker_from_row,
+        )?;
+
+        let stored: Option<(Vec<u8>, String, i64)> = transaction
+            .query_row(
+                "SELECT centroid, model_id, total_speech_ms
+                 FROM session_slots WHERE meeting_id = ?1 AND slot = ?2",
+                params![meeting_id, slot],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        if let Some((centroid, model_id, speech_ms)) = stored {
+            transaction.execute(
+                "INSERT INTO voiceprints
+                    (speaker_id, embedding, dim, model_id, source_meeting_id,
+                     duration_ms, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    speaker.id,
+                    &centroid,
+                    (centroid.len() / 4) as i64,
+                    model_id,
+                    meeting_id,
+                    speech_ms,
+                    now,
+                ],
+            )?;
+        }
+
+        transaction.execute(
+            "UPDATE session_slots SET resolved_speaker_id = ?3
+             WHERE meeting_id = ?1 AND slot = ?2",
+            params![meeting_id, slot, speaker.id],
+        )?;
+        transaction.execute(
+            "UPDATE segments SET speaker_id = ?3
+             WHERE meeting_id = ?1 AND session_slot = ?2",
+            params![meeting_id, slot, speaker.id],
+        )?;
+
+        transaction.commit()?;
+        Ok(speaker)
+    }
+}
+
+fn speaker_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Speaker> {
+    Ok(Speaker {
+        id: row.get(0)?,
+        display_name: row.get(1)?,
+        created_at: row.get(2)?,
+        notes: row.get(3)?,
+    })
 }

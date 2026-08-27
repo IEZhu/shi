@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use shi_audio::StreamKind;
 
+use crate::diarize::Attribution;
+
 /// Something the pipeline learned about a stream, in the order it learned it.
 ///
 /// Drafts are provisional and always superseded: every `Draft` for an
@@ -25,6 +27,9 @@ pub enum PipelineEvent {
         /// supplies them.
         token_offsets: Vec<Duration>,
         tokens: Vec<String>,
+        /// Who said it, when the stream is being diarized. `None` on the
+        /// microphone, where the speaker is known by construction.
+        speaker: Option<Attribution>,
     },
     /// An utterance ended without producing any text, so the UI can drop the
     /// draft it is currently showing instead of leaving it stranded.

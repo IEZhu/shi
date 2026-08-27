@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { StreamCard, Transcript } from "./components";
+import { ReviewScreen, SpeakerToast } from "./speakers";
 import { useTranscript } from "./useTranscript";
 import type { Readiness, StreamStatus } from "./types";
 
@@ -24,7 +25,8 @@ export function App() {
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const { turns, reset } = useTranscript();
+  const { turns, discovered, reset, nameSlot, dismissSlot } = useTranscript();
+  const [reviewing, setReviewing] = useState<number | null>(null);
   const unlisten = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -62,8 +64,37 @@ export function App() {
 
   const startMeeting = useCallback(async () => {
     reset();
+    setReviewing(null);
     await act("start_meeting", { title });
   }, [act, reset, title]);
+
+  // Stopping leads straight into naming whatever is still unnamed: the moment
+  // the meeting ends is the moment the user still remembers who was who.
+  const stopMeeting = useCallback(async () => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      const next = await invoke<Readiness>("stop");
+      setReadiness(next);
+      if (next.meetingId !== null) {
+        setReviewing(next.meetingId);
+      }
+    } catch (error) {
+      setFailure(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const nameVoice = useCallback(
+    async (slot: number, name: string) => {
+      const meetingId = readiness?.meetingId;
+      if (meetingId == null) return;
+      await invoke("name_voice", { meetingId, slot, name });
+      nameSlot(slot, name);
+    },
+    [nameSlot, readiness?.meetingId],
+  );
 
   return (
     <main className={active ? "active" : ""}>
@@ -87,7 +118,11 @@ export function App() {
             />
           )}
           {active ? (
-            <button className="stop" onClick={() => act("stop")} disabled={busy}>
+            <button
+              className="stop"
+              onClick={recording ? stopMeeting : () => act("stop")}
+              disabled={busy}
+            >
               Остановить
             </button>
           ) : (
@@ -131,6 +166,14 @@ export function App() {
         />
       </div>
 
+      {reviewing !== null && (
+        <ReviewScreen
+          meetingId={reviewing}
+          onNamed={nameSlot}
+          onClose={() => setReviewing(null)}
+        />
+      )}
+
       {recording && (
         <>
           <div className="transcript-head">
@@ -153,6 +196,17 @@ export function App() {
           </div>
           <Transcript turns={turns} />
         </>
+      )}
+
+      {/* One at a time: a stack of cards during a call is worse than the
+          problem it solves. The rest wait for the review screen. */}
+      {recording && discovered.length > 0 && (
+        <SpeakerToast
+          key={discovered[0]}
+          slot={discovered[0]}
+          onName={(name) => nameVoice(discovered[0], name)}
+          onDismiss={() => dismissSlot(discovered[0])}
+        />
       )}
     </main>
   );

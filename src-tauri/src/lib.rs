@@ -96,30 +96,163 @@ fn meetings(state: State<'_, AppState>) -> Result<Vec<MeetingSummary>, AppError>
         .collect()
 }
 
-/// Give every segment currently labelled `from` the name `to`, then re-render.
-///
-/// Passing `null` for `from` claims the segments identification has not
-/// resolved yet — the common case after a meeting.
+/// An unnamed voice heard in a meeting, for the review screen.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnnamedVoice {
+    slot: u32,
+    total_speech_ms: i64,
+    utterances: u32,
+    /// A line this voice actually said, so the user can recognise it without
+    /// playing anything back.
+    excerpt: Option<String>,
+}
+
 #[tauri::command]
-fn rename_speaker(
+fn unnamed_voices(
     state: State<'_, AppState>,
     meeting_id: i64,
-    from: Option<String>,
-    to: String,
-) -> Result<usize, AppError> {
+) -> Result<Vec<UnnamedVoice>, AppError> {
+    let session = lock_session(&state);
+    let store = session.store();
+    let store = store.lock().unwrap_or_else(|p| p.into_inner());
+
+    let segments = store.segments(meeting_id)?;
+    Ok(store
+        .session_slots(meeting_id)?
+        .into_iter()
+        .filter(|slot| slot.resolved_speaker_id.is_none())
+        .map(|slot| UnnamedVoice {
+            slot: slot.slot,
+            total_speech_ms: slot.total_speech_ms,
+            utterances: slot.utterances,
+            // The longest thing they said carries the most recognisable
+            // content; a two-word line identifies nobody.
+            excerpt: segments
+                .iter()
+                .filter(|s| s.session_slot == Some(slot.slot))
+                .max_by_key(|s| s.text.chars().count())
+                .map(|s| s.text.clone()),
+        })
+        .collect())
+}
+
+/// Give an unnamed voice a name.
+///
+/// Claims every line it spoke, and stores its voiceprint so the same person is
+/// recognised automatically in later meetings.
+#[tauri::command]
+fn name_voice(
+    state: State<'_, AppState>,
+    meeting_id: i64,
+    slot: u32,
+    name: String,
+) -> Result<i64, AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::EmptyName);
+    }
+
+    // Enrolment outlives the meeting, so it is worth an audit line.
+    tracing::info!(meeting_id, slot, name, "naming a voice");
+
+    let session = lock_session(&state);
+    let store = session.store();
+    let speaker = {
+        let mut guard = store.lock().unwrap_or_else(|p| p.into_inner());
+        guard.name_session_slot(meeting_id, slot, name, &jiff::Zoned::now().to_string())?
+    };
+
+    rerender(&session, meeting_id)?;
+    Ok(speaker.id)
+}
+
+/// Undo an enrolment.
+///
+/// A voiceprint recorded under the wrong name does not merely spoil one
+/// transcript — it will confidently mislabel every future meeting that person
+/// attends. Removing it has to be as easy as creating it was.
+#[tauri::command]
+fn forget_speaker(state: State<'_, AppState>, speaker_id: i64) -> Result<(), AppError> {
+    tracing::info!(speaker_id, "forgetting a voice");
+
+    let session = lock_session(&state);
+    let store = session.store();
+    let meetings = {
+        let guard = store.lock().unwrap_or_else(|p| p.into_inner());
+        guard.forget_speaker(speaker_id)?;
+        guard.meetings()?
+    };
+
+    for meeting in meetings {
+        rerender(&session, meeting.id)?;
+    }
+    Ok(())
+}
+
+/// Someone the app has learned to recognise.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KnownSpeaker {
+    id: i64,
+    display_name: String,
+}
+
+#[tauri::command]
+fn speakers(state: State<'_, AppState>) -> Result<Vec<KnownSpeaker>, AppError> {
     let session = lock_session(&state);
     let store = session.store();
     let guard = store.lock().unwrap_or_else(|p| p.into_inner());
+    Ok(guard
+        .speakers()?
+        .into_iter()
+        .map(|speaker| KnownSpeaker {
+            id: speaker.id,
+            display_name: speaker.display_name,
+        })
+        .collect())
+}
 
-    let changed = guard.rename_speaker(meeting_id, from.as_deref(), &to)?;
+/// Rename a person everywhere they appear.
+///
+/// One row: every transcript they were ever in is correct the next time it
+/// renders, which is why segments store a reference rather than a name.
+#[tauri::command]
+fn rename_speaker(
+    state: State<'_, AppState>,
+    speaker_id: i64,
+    name: String,
+) -> Result<(), AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::EmptyName);
+    }
 
+    let session = lock_session(&state);
+    let store = session.store();
+    let meetings = {
+        let guard = store.lock().unwrap_or_else(|p| p.into_inner());
+        guard.rename_speaker(speaker_id, name)?;
+        guard.meetings()?
+    };
+
+    // Every meeting they appear in now renders differently.
+    for meeting in meetings {
+        rerender(&session, meeting.id)?;
+    }
+    Ok(())
+}
+
+/// Rewrite a meeting's Markdown from the database.
+fn rerender(session: &Session, meeting_id: i64) -> Result<(), AppError> {
+    let store = session.store();
+    let guard = store.lock().unwrap_or_else(|p| p.into_inner());
     let meeting = guard.meeting(meeting_id)?;
     let segments = guard.segments(meeting_id)?;
     let config = session.config();
     let path = config.markdown_path(&meeting);
     shi_store::markdown::write_to(&path, &meeting, &segments, &config.markdown())?;
-
-    Ok(changed)
+    Ok(())
 }
 
 fn default_meeting_title() -> String {
@@ -188,6 +321,10 @@ pub fn run() {
             start_meeting,
             stop,
             meetings,
+            unnamed_voices,
+            name_voice,
+            forget_speaker,
+            speakers,
             rename_speaker
         ])
         .build(tauri::generate_context!())

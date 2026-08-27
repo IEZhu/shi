@@ -4,7 +4,7 @@ import {
   type StreamName,
   type TranscriptEvent,
   type Turn,
-  defaultSpeaker,
+  speakerLabel,
 } from "./types";
 
 interface FinalTurn extends Turn {
@@ -22,6 +22,8 @@ interface FinalTurn extends Turn {
 export function useTranscript() {
   const [finals, setFinals] = useState<FinalTurn[]>([]);
   const [drafts, setDrafts] = useState<Partial<Record<StreamName, Turn>>>({});
+  /** Voices heard this meeting that nobody has named yet. */
+  const [discovered, setDiscovered] = useState<number[]>([]);
   const unlisten = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -34,9 +36,10 @@ export function useTranscript() {
               key: `draft-${payload.stream}`,
               stream: payload.stream,
               startMs: payload.startMs,
-              speaker: defaultSpeaker(payload.stream),
+              speaker: speakerLabel(payload.stream, null, null),
               text: payload.text,
               draft: true,
+              slot: null,
             },
           }));
           break;
@@ -53,9 +56,10 @@ export function useTranscript() {
               key: `final-${payload.id}`,
               stream: payload.stream,
               startMs: payload.startMs,
-              speaker: payload.speaker ?? defaultSpeaker(payload.stream),
+              speaker: speakerLabel(payload.stream, payload.speaker, payload.slot),
               text: payload.text,
               draft: false,
+              slot: payload.slot,
             },
           ]);
           break;
@@ -66,6 +70,12 @@ export function useTranscript() {
             delete next[payload.stream];
             return next;
           });
+          break;
+
+        case "speakerDiscovered":
+          setDiscovered((current) =>
+            current.includes(payload.slot) ? current : [...current, payload.slot],
+          );
           break;
       }
     }).then((stop) => {
@@ -78,6 +88,19 @@ export function useTranscript() {
   const reset = useCallback(() => {
     setFinals([]);
     setDrafts({});
+    setDiscovered([]);
+  }, []);
+
+  /** Apply a name to every line of a voice, without waiting for a reload. */
+  const nameSlot = useCallback((slot: number, name: string) => {
+    setFinals((current) =>
+      current.map((turn) => (turn.slot === slot ? { ...turn, speaker: name } : turn)),
+    );
+    setDiscovered((current) => current.filter((s) => s !== slot));
+  }, []);
+
+  const dismissSlot = useCallback((slot: number) => {
+    setDiscovered((current) => current.filter((s) => s !== slot));
   }, []);
 
   // Drafts sit at the end: they are the words being spoken right now.
@@ -86,5 +109,5 @@ export function useTranscript() {
     ...Object.values(drafts).filter((t): t is Turn => t !== undefined),
   ];
 
-  return { turns, reset };
+  return { turns, discovered, reset, nameSlot, dismissSlot };
 }

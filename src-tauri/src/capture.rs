@@ -102,6 +102,9 @@ pub struct Readiness {
     pub rtf: Option<f32>,
     /// Utterances dropped because the microphone was hearing the speakers.
     pub echo_suppressed: u64,
+    /// The meeting being recorded, or the one just finished — the review
+    /// screen needs it after `recording` has already gone false.
+    pub meeting_id: Option<i64>,
 }
 
 impl Readiness {
@@ -113,6 +116,7 @@ impl Readiness {
             recording: false,
             rtf: None,
             echo_suppressed: 0,
+            meeting_id: None,
         }
     }
 }

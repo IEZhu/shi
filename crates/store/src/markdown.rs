@@ -25,6 +25,10 @@ pub struct MarkdownOptions {
     pub unnamed_mic: String,
     /// Name for system audio that identification has not claimed.
     pub unnamed_system: String,
+    /// Prefix for a voice this meeting has heard but nobody has named, e.g.
+    /// "Спикер 2". Deliberately numbered rather than left blank: the reader
+    /// can follow who is who even before the names arrive.
+    pub unnamed_slot: String,
 }
 
 impl Default for MarkdownOptions {
@@ -33,16 +37,24 @@ impl Default for MarkdownOptions {
             timestamps: Timestamps::Wall,
             unnamed_mic: "Вы".into(),
             unnamed_system: "Собеседник".into(),
+            unnamed_slot: "Спикер".into(),
         }
     }
 }
 
 impl MarkdownOptions {
+    /// Resolve who to print, most specific first.
     fn speaker_of(&self, segment: &Segment) -> String {
-        segment.speaker.clone().unwrap_or_else(|| match segment.stream {
+        if let Some(name) = &segment.speaker_name {
+            return name.clone();
+        }
+        if let Some(slot) = segment.session_slot {
+            return format!("{} {slot}", self.unnamed_slot);
+        }
+        match segment.stream {
             StreamKind::Mic => self.unnamed_mic.clone(),
             StreamKind::System => self.unnamed_system.clone(),
-        })
+        }
     }
 }
 

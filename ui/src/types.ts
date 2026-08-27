@@ -24,6 +24,8 @@ export interface Readiness {
   rtf: number | null;
   /** Utterances dropped because the microphone was hearing the speakers. */
   echoSuppressed: number;
+  /** The meeting being recorded, or the one just finished. */
+  meetingId: number | null;
 }
 
 /// Mirrors `session::TranscriptEvent`.
@@ -35,10 +37,22 @@ export type TranscriptEvent =
       stream: StreamName;
       startMs: number;
       endMs: number;
+      /** Resolved name, when the voice is known. */
       speaker: string | null;
+      /** Unnamed voice within this meeting. */
+      slot: number | null;
       text: string;
     }
-  | { kind: "draftAbandoned"; stream: StreamName };
+  | { kind: "draftAbandoned"; stream: StreamName }
+  | { kind: "speakerDiscovered"; slot: number };
+
+/** An unnamed voice awaiting a name. */
+export interface UnnamedVoice {
+  slot: number;
+  totalSpeechMs: number;
+  utterances: number;
+  excerpt: string | null;
+}
 
 export type StreamName = "mic" | "system";
 
@@ -50,6 +64,8 @@ export interface Turn {
   text: string;
   /** Drafts are provisional and will be replaced by a final. */
   draft: boolean;
+  /** Set when the speaker is an unnamed voice, so naming it can update here. */
+  slot: number | null;
 }
 
 export const VERDICT_LABEL: Record<Verdict, string> = {
@@ -88,7 +104,19 @@ export function formatOffset(ms: number): string {
   return `${pad(Math.floor(total / 3600))}:${pad(Math.floor(total / 60) % 60)}:${pad(total % 60)}`;
 }
 
-/** Fallback names before diarization has anything to say. */
-export function defaultSpeaker(stream: StreamName): string {
+/** How to label a turn: a name, a numbered voice, or the stream it came from. */
+export function speakerLabel(
+  stream: StreamName,
+  name: string | null,
+  slot: number | null,
+): string {
+  if (name) return name;
+  if (slot !== null) return `Спикер ${slot}`;
   return stream === "mic" ? "Вы" : "Собеседник";
+}
+
+export function formatDuration(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds} с`;
+  return `${Math.floor(seconds / 60)} мин ${String(seconds % 60).padStart(2, "0")} с`;
 }

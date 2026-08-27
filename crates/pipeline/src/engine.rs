@@ -8,6 +8,7 @@ use shi_audio::StreamKind;
 
 use crate::asr::{ASR_SAMPLE_RATE, Transcriber};
 use crate::cadence::Cadence;
+use crate::diarize::{SessionSlot, SpeakerTracker};
 use crate::echo::EchoReference;
 use crate::error::{PipelineError, Result};
 use crate::event::PipelineEvent;
@@ -77,6 +78,8 @@ pub struct StreamPipeline {
     draft_showing: bool,
     echo: EchoRole,
     suppressed: u64,
+    /// Present only on the stream that carries several people.
+    speakers: Option<SpeakerTracker>,
 }
 
 impl StreamPipeline {
@@ -128,12 +131,35 @@ impl StreamPipeline {
             draft_showing: false,
             echo: EchoRole::default(),
             suppressed: 0,
+            speakers: None,
         })
     }
 
     /// Measured decode cost per second of audio, for diagnostics.
     pub fn rtf(&self) -> f32 {
         self.cadence.rtf()
+    }
+
+    /// Attribute utterances on this stream to individual voices.
+    ///
+    /// Belongs on the system stream, which carries every remote participant
+    /// mixed together. The microphone needs no tracker: it has one speaker by
+    /// construction, which is the whole reason the streams are kept apart.
+    pub fn identify_speakers(&mut self, tracker: SpeakerTracker) {
+        self.speakers = Some(tracker);
+    }
+
+    /// Voices heard so far, for persisting between utterances.
+    pub fn speaker_slots(&self) -> &[SessionSlot] {
+        self.speakers.as_ref().map_or(&[], |t| t.slots())
+    }
+
+    /// Slots close enough to be one person the tracker split in two.
+    pub fn merge_candidates(&self) -> Vec<(u32, u32, f32)> {
+        self.speakers
+            .as_ref()
+            .map(|t| t.merge_candidates())
+            .unwrap_or_default()
     }
 
     /// Publish this stream's audio so another can recognise it echoing back.
@@ -265,11 +291,17 @@ impl StreamPipeline {
                 continue;
             }
 
+            let speaker = self
+                .speakers
+                .as_mut()
+                .map(|tracker| tracker.attribute(&samples, end.saturating_sub(start)));
+
             tracing::debug!(
                 stream = %self.stream,
                 at = ?start,
                 len = ?end.saturating_sub(start),
                 chars = transcript.text.chars().count(),
+                ?speaker,
                 "finalised an utterance"
             );
 
@@ -287,6 +319,7 @@ impl StreamPipeline {
                     .collect(),
                 text: transcript.text,
                 tokens: transcript.tokens,
+                speaker,
             });
         }
 

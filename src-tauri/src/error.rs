@@ -13,6 +13,9 @@ pub enum AppError {
     #[error(transparent)]
     Pipeline(#[from] shi_pipeline::PipelineError),
 
+    #[error("a speaker needs a name")]
+    EmptyName,
+
     #[error("cannot create application directories: {0}")]
     Io(#[from] std::io::Error),
 }

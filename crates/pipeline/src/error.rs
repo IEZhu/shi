@@ -14,6 +14,9 @@ pub enum PipelineError {
     #[error("sherpa-onnx refused to build a voice activity detector")]
     VadCreateFailed,
 
+    #[error("sherpa-onnx refused to load the speaker embedding model")]
+    SpeakerModelLoadFailed,
+
     #[error("cannot resample {from} Hz to {to} Hz")]
     ResamplerCreateFailed { from: u32, to: u32 },
 }
