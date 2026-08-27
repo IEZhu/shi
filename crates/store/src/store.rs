@@ -5,8 +5,8 @@ use shi_audio::StreamKind;
 
 use crate::error::{Result, StoreError};
 use crate::model::{
-    Meeting, NewSegment, Segment, SessionSlot, Speaker, SpeakerVoice, blob_to_embedding,
-    embedding_to_blob,
+    MATCH_CLOSE, MATCH_OPEN, Meeting, NewSegment, Segment, SearchHit, SessionSlot, Speaker,
+    SpeakerVoice, blob_to_embedding, embedding_to_blob,
 };
 use crate::schema;
 
@@ -322,6 +322,60 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    // ---- search ---------------------------------------------------------
+
+    /// Find transcript lines matching what the user typed.
+    ///
+    /// Ordered by relevance rather than date: someone searching for a decision
+    /// wants the line where it was made, not the most recent meeting.
+    pub fn search(&self, input: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        let Some(query) = fts_query(input) else {
+            return Ok(Vec::new());
+        };
+
+        let mut statement = self.connection.prepare(
+            "SELECT m.id, m.title, m.started_at, s.id, s.t_start_ms,
+                    p.display_name, s.session_slot,
+                    snippet(segments_fts, 0, ?2, ?3, '…', 14)
+             FROM segments_fts
+             JOIN segments s ON s.id = segments_fts.rowid
+             JOIN meetings m ON m.id = s.meeting_id
+             LEFT JOIN speakers p ON p.id = s.speaker_id
+             WHERE segments_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?4",
+        )?;
+
+        let rows = statement.query_map(
+            params![
+                query,
+                MATCH_OPEN.to_string(),
+                MATCH_CLOSE.to_string(),
+                limit as i64
+            ],
+            |row| {
+                Ok(SearchHit {
+                    meeting_id: row.get(0)?,
+                    meeting_title: row.get(1)?,
+                    meeting_started_at: row.get(2)?,
+                    segment_id: row.get(3)?,
+                    start_ms: row.get(4)?,
+                    speaker_name: row.get(5)?,
+                    session_slot: row.get(6)?,
+                    snippet: row.get(7)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Remove a meeting and everything recorded with it.
+    pub fn delete_meeting(&self, meeting_id: i64) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM meetings WHERE id = ?1", params![meeting_id])?;
+        Ok(())
+    }
+
     /// Give an unnamed voice a name.
     ///
     /// Claims every segment of that slot, stores the slot centroid as a
@@ -388,6 +442,40 @@ impl Store {
         transaction.commit()?;
         Ok(speaker)
     }
+}
+
+/// Turn what a person typed into an FTS5 query.
+///
+/// User input reaches FTS5's own query language, where a stray quote or the
+/// word "AND" is a syntax error rather than a search. Quoting every term
+/// removes that surface entirely, and the last term gets a prefix wildcard so
+/// results appear while they are still typing.
+pub fn fts_query(input: &str) -> Option<String> {
+    let terms: Vec<String> = input
+        .split_whitespace()
+        .map(|term| term.replace('"', ""))
+        .filter(|term| !term.is_empty())
+        .collect();
+
+    if terms.is_empty() {
+        return None;
+    }
+
+    let last = terms.len() - 1;
+    Some(
+        terms
+            .iter()
+            .enumerate()
+            .map(|(index, term)| {
+                if index == last {
+                    format!("\"{term}\"*")
+                } else {
+                    format!("\"{term}\"")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 fn speaker_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Speaker> {

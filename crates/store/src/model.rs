@@ -84,6 +84,29 @@ pub struct SpeakerVoice {
     pub embeddings: Vec<Vec<f32>>,
 }
 
+/// One transcript line matching a search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub meeting_id: i64,
+    pub meeting_title: String,
+    pub meeting_started_at: String,
+    pub segment_id: i64,
+    pub start_ms: i64,
+    pub speaker_name: Option<String>,
+    pub session_slot: Option<u32>,
+    /// The line with the matched words wrapped in [`MATCH_OPEN`] and
+    /// [`MATCH_CLOSE`].
+    pub snippet: String,
+}
+
+/// Markers around a matched word.
+///
+/// Control characters rather than HTML: transcript text is whatever people
+/// said, and handing it to the UI as markup to be parsed would turn a spoken
+/// "<script>" into a rendering decision. The UI splits on these instead.
+pub const MATCH_OPEN: char = '\u{2}';
+pub const MATCH_CLOSE: char = '\u{3}';
+
 /// Embeddings are stored as little-endian f32, which is what both the model
 /// and every platform we target already use.
 pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {

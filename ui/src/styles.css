@@ -344,3 +344,34 @@ button.inline {
   text-decoration: underline;
   cursor: pointer;
 }
+
+/* --- archive ------------------------------------------------------------ */
+
+.archive { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.archive header input { width: 220px; }
+.archive > ul,
+.archive > .transcript { overflow-y: auto; min-height: 0; }
+
+.archive-transcript { border: none; padding: 0; background: none; }
+
+.hits { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+.hits li { border-top: 1px solid var(--line); padding-top: 14px; }
+.hits li:first-child { border-top: none; padding-top: 0; }
+.hits .said { color: var(--muted); }
+
+mark {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: var(--ink);
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+.voice-meta.path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}

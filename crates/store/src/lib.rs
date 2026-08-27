@@ -14,7 +14,7 @@ pub mod store;
 pub use error::{Result, StoreError};
 pub use markdown::{MarkdownOptions, render, write_to};
 pub use model::{
-    Meeting, NewSegment, Segment, SessionSlot, Speaker, SpeakerVoice, Voiceprint,
-    blob_to_embedding, embedding_to_blob,
+    MATCH_CLOSE, MATCH_OPEN, Meeting, NewSegment, Segment, SearchHit, SessionSlot, Speaker,
+    SpeakerVoice, Voiceprint, blob_to_embedding, embedding_to_blob,
 };
-pub use store::Store;
+pub use store::{Store, fts_query};

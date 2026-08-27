@@ -81,7 +81,7 @@ crates/audio/        AudioSource trait, ring buffers, mic (cpal), WAV FileSource
 crates/audio/objc/   Core Audio process-tap shim (macOS)
 crates/pipeline/     resampling, VAD, recognition, draft cadence, echo suppression,
                      speaker tracking
-crates/store/        SQLite schema and the Markdown projection
+crates/store/        SQLite schema, full-text search, the Markdown projection
 crates/models/       catalogue, verified downloads, install and removal
 src-tauri/           app shell, session orchestration, commands
 ui/                  React frontend

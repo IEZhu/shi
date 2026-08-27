@@ -160,3 +160,83 @@ export function formatBytes(bytes: number): string {
   const mb = bytes / (1024 * 1024);
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} ГБ` : `${Math.round(mb)} МБ`;
 }
+
+/** Mirrors `MeetingSummary`. */
+export interface MeetingSummary {
+  id: number;
+  title: string;
+  startedAt: string;
+  endedAt: string | null;
+  mdPath: string | null;
+  segmentCount: number;
+}
+
+/** Mirrors `ArchivedLine`. */
+export interface ArchivedLine {
+  id: number;
+  stream: StreamName;
+  startMs: number;
+  speaker: string | null;
+  slot: number | null;
+  text: string;
+}
+
+/** Mirrors `SearchResult`. */
+export interface SearchResult {
+  meetingId: number;
+  meetingTitle: string;
+  meetingStartedAt: string;
+  startMs: number;
+  speaker: string | null;
+  slot: number | null;
+  snippet: string;
+}
+
+/** The markers `store::MATCH_OPEN` / `MATCH_CLOSE` put around matched words. */
+const MATCH_OPEN = "\u0002";
+const MATCH_CLOSE = "\u0003";
+
+/**
+ * Split a snippet into plain and matched runs.
+ *
+ * Returned as data rather than HTML on purpose: transcript text is whatever
+ * people said, and rendering it as markup would make a spoken tag a rendering
+ * decision.
+ */
+export function splitSnippet(snippet: string): { text: string; match: boolean }[] {
+  const parts: { text: string; match: boolean }[] = [];
+  let rest = snippet;
+
+  while (rest.length > 0) {
+    const open = rest.indexOf(MATCH_OPEN);
+    if (open === -1) {
+      parts.push({ text: rest, match: false });
+      break;
+    }
+    if (open > 0) parts.push({ text: rest.slice(0, open), match: false });
+
+    const close = rest.indexOf(MATCH_CLOSE, open);
+    if (close === -1) {
+      parts.push({ text: rest.slice(open + 1), match: true });
+      break;
+    }
+    parts.push({ text: rest.slice(open + 1, close), match: true });
+    rest = rest.slice(close + 1);
+  }
+
+  return parts.filter((part) => part.text.length > 0);
+}
+
+/** "2026-08-27T10:03:00+03:00[Europe/Moscow]" -> "27.08.2026, 10:03" */
+export function formatMeetingStart(value: string): string {
+  const iso = value.replace(/\[.*\]$/, "");
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("ru", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}

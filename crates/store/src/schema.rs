@@ -80,6 +80,37 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE segments ADD COLUMN session_slot INTEGER;
     ALTER TABLE segments DROP COLUMN speaker;
     "#,
+    // 3 — full-text search over transcripts
+    //
+    // An external-content table so the text is stored once. unicode61 folds
+    // case across Cyrillic as well as Latin, which is what a Russian
+    // transcript needs; the triggers keep the index honest when a segment is
+    // edited or a meeting is deleted.
+    r#"
+    CREATE VIRTUAL TABLE segments_fts USING fts5(
+        text,
+        content = 'segments',
+        content_rowid = 'id',
+        tokenize = 'unicode61'
+    );
+
+    CREATE TRIGGER segments_fts_insert AFTER INSERT ON segments BEGIN
+        INSERT INTO segments_fts (rowid, text) VALUES (new.id, new.text);
+    END;
+
+    CREATE TRIGGER segments_fts_delete AFTER DELETE ON segments BEGIN
+        INSERT INTO segments_fts (segments_fts, rowid, text)
+        VALUES ('delete', old.id, old.text);
+    END;
+
+    CREATE TRIGGER segments_fts_update AFTER UPDATE OF text ON segments BEGIN
+        INSERT INTO segments_fts (segments_fts, rowid, text)
+        VALUES ('delete', old.id, old.text);
+        INSERT INTO segments_fts (rowid, text) VALUES (new.id, new.text);
+    END;
+
+    INSERT INTO segments_fts (rowid, text) SELECT id, text FROM segments;
+    "#,
 ];
 
 /// Bring a database up to the current schema. Safe to call on every open.

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { StreamCard, Transcript } from "./components";
+import { Archive } from "./archive";
 import { ModelManager } from "./models";
 import { ReviewScreen, SpeakerToast } from "./speakers";
 import { useTranscript } from "./useTranscript";
@@ -29,6 +30,7 @@ export function App() {
   const { turns, discovered, reset, nameSlot, dismissSlot } = useTranscript();
   const [reviewing, setReviewing] = useState<number | null>(null);
   const [managingModels, setManagingModels] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
   const unlisten = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -129,6 +131,9 @@ export function App() {
             </button>
           ) : (
             <>
+              <button className="ghost" onClick={() => setBrowsing(true)}>
+                Архив
+              </button>
               <button className="ghost" onClick={() => setManagingModels(true)}>
                 Модели
               </button>
@@ -158,20 +163,24 @@ export function App() {
       )}
       {failure && <p className="notice error">{failure}</p>}
 
-      <div className="streams">
-        <StreamCard
-          title="Микрофон"
-          subtitle="вы — один голос, диаризация не нужна"
-          status={readiness?.mic ?? idle("mic")}
-          compact={recording}
-        />
-        <StreamCard
-          title="Системный звук"
-          subtitle="удалённые участники — здесь работает диаризация"
-          status={readiness?.system ?? idle("system")}
-          compact={recording}
-        />
-      </div>
+      {!browsing && !managingModels && (
+        <div className="streams">
+          <StreamCard
+            title="Микрофон"
+            subtitle="вы — один голос, диаризация не нужна"
+            status={readiness?.mic ?? idle("mic")}
+            compact={recording}
+          />
+          <StreamCard
+            title="Системный звук"
+            subtitle="удалённые участники — здесь работает диаризация"
+            status={readiness?.system ?? idle("system")}
+            compact={recording}
+          />
+        </div>
+      )}
+
+      {browsing && <Archive onClose={() => setBrowsing(false)} />}
 
       {managingModels && (
         <ModelManager
@@ -191,7 +200,7 @@ export function App() {
         />
       )}
 
-      {recording && (
+      {recording && !browsing && !managingModels && (
         <>
           <div className="transcript-head">
             <h2>Транскрипт</h2>
@@ -217,7 +226,7 @@ export function App() {
 
       {/* One at a time: a stack of cards during a call is worse than the
           problem it solves. The rest wait for the review screen. */}
-      {recording && discovered.length > 0 && (
+      {recording && !browsing && !managingModels && discovered.length > 0 && (
         <SpeakerToast
           key={discovered[0]}
           slot={discovered[0]}

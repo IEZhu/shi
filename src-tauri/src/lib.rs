@@ -260,6 +260,93 @@ fn rerender(session: &Session, meeting_id: i64) -> Result<(), AppError> {
     Ok(())
 }
 
+// ---- archive -----------------------------------------------------------
+
+/// A line of a past meeting, for the archive view.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchivedLine {
+    id: i64,
+    stream: String,
+    start_ms: i64,
+    speaker: Option<String>,
+    slot: Option<u32>,
+    text: String,
+}
+
+/// One search result.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResult {
+    meeting_id: i64,
+    meeting_title: String,
+    meeting_started_at: String,
+    start_ms: i64,
+    speaker: Option<String>,
+    slot: Option<u32>,
+    /// The matched line, with matches wrapped in the markers the UI splits on.
+    snippet: String,
+}
+
+#[tauri::command]
+fn meeting_transcript(
+    state: State<'_, AppState>,
+    meeting_id: i64,
+) -> Result<Vec<ArchivedLine>, AppError> {
+    let session = lock_session(&state);
+    let store = session.store();
+    let guard = store.lock().unwrap_or_else(|p| p.into_inner());
+
+    Ok(guard
+        .segments(meeting_id)?
+        .into_iter()
+        .map(|segment| ArchivedLine {
+            id: segment.id,
+            stream: segment.stream.as_str().into(),
+            start_ms: segment.start_ms,
+            speaker: segment.speaker_name,
+            slot: segment.session_slot,
+            text: segment.text,
+        })
+        .collect())
+}
+
+/// Search every transcript.
+#[tauri::command]
+fn search(state: State<'_, AppState>, query: String) -> Result<Vec<SearchResult>, AppError> {
+    const LIMIT: usize = 60;
+
+    let session = lock_session(&state);
+    let store = session.store();
+    let guard = store.lock().unwrap_or_else(|p| p.into_inner());
+
+    Ok(guard
+        .search(&query, LIMIT)?
+        .into_iter()
+        .map(|hit| SearchResult {
+            meeting_id: hit.meeting_id,
+            meeting_title: hit.meeting_title,
+            meeting_started_at: hit.meeting_started_at,
+            start_ms: hit.start_ms,
+            speaker: hit.speaker_name,
+            slot: hit.session_slot,
+            snippet: hit.snippet,
+        })
+        .collect())
+}
+
+/// Delete a meeting and its transcript. The Markdown file is left alone: it is
+/// in the user's own folder and may already have been edited or filed.
+#[tauri::command]
+fn delete_meeting(state: State<'_, AppState>, meeting_id: i64) -> Result<(), AppError> {
+    tracing::info!(meeting_id, "deleting a meeting");
+    let session = lock_session(&state);
+    let store = session.store();
+    let guard = store.lock().unwrap_or_else(|p| p.into_inner());
+    guard.delete_meeting(meeting_id)?;
+    Ok(())
+}
+
 // ---- models ------------------------------------------------------------
 
 #[tauri::command]
@@ -383,6 +470,9 @@ pub fn run() {
             start_meeting,
             stop,
             meetings,
+            meeting_transcript,
+            search,
+            delete_meeting,
             model_catalogue,
             install_model,
             cancel_model_install,
