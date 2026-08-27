@@ -8,6 +8,8 @@
   --warn: #b45309;
   --danger: #b42318;
   --meter-bg: #eceff3;
+  --mic: #2f7d5d;
+  --system: #2563a8;
   color-scheme: light dark;
 }
 
@@ -22,69 +24,115 @@
     --warn: #e0a458;
     --danger: #f0736a;
     --meter-bg: #23282f;
+    --mic: #6fd0a8;
+    --system: #7ab6ea;
   }
 }
 
 * { box-sizing: border-box; }
 
+html, body, #root { height: 100%; }
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-main { padding: 28px 32px 40px; max-width: 900px; margin: 0 auto; }
+main {
+  height: 100%;
+  padding: 24px 28px 28px;
+  max-width: 940px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
 
 .top {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 24px;
-  margin-bottom: 24px;
+  gap: 20px;
+  flex: none;
 }
 
-h1 { font-size: 21px; margin: 0 0 6px; letter-spacing: -0.01em; }
-.lede { margin: 0; color: var(--muted); max-width: 46ch; }
-.lede em { font-style: normal; color: var(--ink); font-weight: 600; }
+h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.01em; }
+.lede { margin: 0; color: var(--muted); max-width: 44ch; }
+
+.controls { display: flex; gap: 8px; align-items: center; }
+
+input {
+  font: inherit;
+  padding: 8px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  width: 190px;
+}
+input::placeholder { color: var(--muted); }
 
 button {
   font: inherit;
   font-weight: 600;
-  padding: 9px 18px;
+  padding: 8px 16px;
   border-radius: 8px;
   border: 1px solid transparent;
   cursor: pointer;
   white-space: nowrap;
   transition: opacity 120ms ease;
 }
-button:disabled { opacity: 0.5; cursor: default; }
+button:disabled { opacity: 0.45; cursor: default; }
 button.start { background: var(--accent); color: #08120d; }
-button.stop { background: transparent; border-color: var(--line); color: var(--ink); }
+button.stop,
+button.ghost { background: transparent; border-color: var(--line); color: var(--ink); }
 
-.grid { display: grid; gap: 16px; }
+.notice {
+  flex: none;
+  margin: 0;
+  padding: 10px 13px;
+  border-radius: 8px;
+  font-size: 13px;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+}
+.notice.error {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+}
+.notice code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.streams { display: grid; gap: 12px; flex: none; }
 
 .card {
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 18px 20px 20px;
+  padding: 16px 18px 18px;
 }
+.card.compact { padding: 10px 14px; }
 .card header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
+.card.compact header { margin-bottom: 8px; }
 .card h2 { font-size: 15px; margin: 0 0 3px; }
+.card.compact h2 { font-size: 13px; margin: 0; }
 .subtitle { margin: 0; color: var(--muted); font-size: 13px; }
 
 .badge {
   font-size: 12px;
   font-weight: 600;
-  padding: 3px 9px;
+  padding: 2px 9px;
   border-radius: 999px;
   border: 1px solid var(--line);
   color: var(--muted);
@@ -96,12 +144,12 @@ button.stop { background: transparent; border-color: var(--line); color: var(--i
 .verdict-failed .badge { color: var(--danger); border-color: currentColor; }
 
 .meter {
-  height: 8px;
+  height: 7px;
   border-radius: 999px;
   background: var(--meter-bg);
   overflow: hidden;
-  margin-bottom: 16px;
 }
+.card:not(.compact) .meter { margin-bottom: 14px; }
 .meter-fill {
   height: 100%;
   background: var(--accent);
@@ -112,8 +160,8 @@ button.stop { background: transparent; border-color: var(--line); color: var(--i
 
 .facts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 12px 20px;
+  grid-template-columns: repeat(auto-fit, minmax(115px, 1fr));
+  gap: 10px 20px;
   margin: 0;
 }
 .facts dt { color: var(--muted); font-size: 12px; margin-bottom: 2px; }
@@ -127,15 +175,69 @@ button.stop { background: transparent; border-color: var(--line); color: var(--i
 .facts dd.warn { color: var(--warn); }
 
 .problem {
-  margin: 16px 0 0;
-  padding: 11px 13px;
+  margin: 14px 0 0;
+  padding: 10px 12px;
   border-radius: 8px;
   background: color-mix(in srgb, var(--warn) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
-  color: var(--ink);
   font-size: 13px;
 }
 .verdict-failed .problem {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   border-color: color-mix(in srgb, var(--danger) 30%, transparent);
 }
+
+.transcript-head {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.transcript-head h2 { font-size: 15px; margin: 0; }
+.rtf {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.transcript {
+  flex: 1;
+  min-height: 160px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+.transcript.empty {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+.transcript.empty p { margin: 0; }
+
+.turn { margin: 0 0 14px; }
+.turn.continues { margin-top: -10px; }
+
+.turn-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.time {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.who { font-weight: 600; font-size: 13px; }
+.stream-mic .who { color: var(--mic); }
+.stream-system .who { color: var(--system); }
+
+.said { display: block; }
+
+/* Drafts are provisional: readable, but visibly not the final word. */
+.turn.draft .said { color: var(--muted); font-style: italic; }
+.turn.draft .who { opacity: 0.7; }

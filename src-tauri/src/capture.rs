@@ -1,22 +1,12 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
-
 use serde::Serialize;
 use shi_audio::{AudioSource, MicSource, StreamHandle, StreamKind, SystemSource};
-use tauri::{AppHandle, Emitter};
 
-/// How often the readiness meters refresh. Fast enough to look live, slow
-/// enough that the UI thread is not the bottleneck.
-const TICK: Duration = Duration::from_millis(50);
-
-/// Event name the frontend subscribes to.
+/// Event name carrying [`Readiness`] to the frontend.
 pub const READINESS_EVENT: &str = "readiness";
 
 /// What the readiness panel needs to know about one stream.
 ///
-/// `verdict` is deliberately separate from `running`: on macOS a refused
+/// `verdict` is deliberately more than a boolean: on macOS a refused
 /// system-audio grant produces a stream that is running, accumulating frames,
 /// and completely silent. Only [`Verdict::Silent`] catches that.
 #[derive(Debug, Clone, Serialize)]
@@ -34,10 +24,9 @@ pub struct StreamStatus {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Verdict {
-    /// Not started.
     Stopped,
     /// The source refused to start; `error` explains why.
     Failed,
@@ -46,12 +35,11 @@ pub enum Verdict {
     /// Frames arrive and every one of them is zero. On macOS this is what a
     /// denied capture permission looks like — see docs/capture-macos.md.
     Silent,
-    /// Frames arrive and carry real audio.
     Ok,
 }
 
 impl StreamStatus {
-    fn stopped(kind: StreamKind) -> Self {
+    pub fn stopped(kind: StreamKind) -> Self {
         Self {
             kind: kind.as_str().to_string(),
             verdict: Verdict::Stopped,
@@ -65,7 +53,7 @@ impl StreamStatus {
         }
     }
 
-    fn failed(kind: StreamKind, error: String) -> Self {
+    pub fn failed(kind: StreamKind, error: String) -> Self {
         Self {
             verdict: Verdict::Failed,
             error: Some(error),
@@ -73,55 +61,76 @@ impl StreamStatus {
         }
     }
 
-    fn sample(handle: &StreamHandle) -> Self {
-        let captured = handle.stats.frames_captured();
+    /// Sample a running stream. Consumes the peak, so only the metering thread
+    /// should call this.
+    pub fn sample(info: &shi_audio::SourceInfo, stats: &shi_audio::StreamStats) -> Self {
+        let captured = stats.frames_captured();
         let verdict = if captured == 0 {
             Verdict::NoFrames
-        } else if !handle.stats.has_signal() {
+        } else if !stats.has_signal() {
             Verdict::Silent
         } else {
             Verdict::Ok
         };
 
         Self {
-            kind: handle.info.kind.as_str().to_string(),
+            kind: info.kind.as_str().to_string(),
             verdict,
-            device_name: Some(handle.info.device_name.clone()),
-            sample_rate: Some(handle.info.sample_rate),
-            channels: Some(handle.info.channels),
+            device_name: Some(info.device_name.clone()),
+            sample_rate: Some(info.sample_rate),
+            channels: Some(info.channels),
             frames_captured: captured,
-            frames_dropped: handle.stats.frames_dropped(),
-            peak: handle.stats.take_peak(),
+            frames_dropped: stats.frames_dropped(),
+            peak: stats.take_peak(),
             error: None,
         }
     }
 }
 
+/// Capture health plus anything else that must be true before a meeting.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Readiness {
     pub mic: StreamStatus,
     pub system: StreamStatus,
+    /// Models the pipeline needs but cannot find. A missing model at the start
+    /// of a call is the same class of failure as a missing permission.
+    pub missing_models: Vec<String>,
+    /// True while a meeting is being transcribed.
+    pub recording: bool,
+    /// Measured decode cost per second of audio, once transcription has run.
+    pub rtf: Option<f32>,
 }
 
 impl Readiness {
-    fn idle() -> Self {
+    pub fn idle(missing_models: Vec<String>) -> Self {
         Self {
             mic: StreamStatus::stopped(StreamKind::Mic),
             system: StreamStatus::stopped(StreamKind::System),
+            missing_models,
+            recording: false,
+            rtf: None,
         }
     }
 }
 
-/// Owns both capture sources and the thread that meters them.
+/// Both capture sources, started and stopped together.
 pub struct Capture {
     mic: MicSource,
     system: SystemSource,
-    stop: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-    /// Shared with the metering thread so a `readiness` query is always current,
-    /// even if the frontend missed an event or reconnected late.
-    last: Arc<Mutex<Readiness>>,
+}
+
+/// Streams as they came up. Either may fail on its own: a working microphone
+/// with a broken tap is still worth reporting rather than aborting.
+pub struct StartedStreams {
+    pub mic: Result<StreamHandle, StreamStatus>,
+    pub system: Result<StreamHandle, StreamStatus>,
+}
+
+impl StartedStreams {
+    pub fn any_running(&self) -> bool {
+        self.mic.is_ok() || self.system.is_ok()
+    }
 }
 
 impl Capture {
@@ -129,119 +138,25 @@ impl Capture {
         Self {
             mic: MicSource::default_device(),
             system: SystemSource::new(),
-            stop: Arc::new(AtomicBool::new(false)),
-            worker: None,
-            last: Arc::new(Mutex::new(Readiness::idle())),
         }
     }
 
-    pub fn snapshot(&self) -> Readiness {
-        self.last
-            .lock()
-            .map(|r| r.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
-    }
-
-    /// Start both streams. Either may fail independently — a working
-    /// microphone with a broken tap is still worth reporting honestly.
-    pub fn start(&mut self, app: AppHandle) -> Readiness {
-        if self.worker.is_some() {
-            return self.snapshot();
+    pub fn start(&mut self) -> StartedStreams {
+        StartedStreams {
+            mic: self
+                .mic
+                .start()
+                .map_err(|e| StreamStatus::failed(StreamKind::Mic, e.to_string())),
+            system: self
+                .system
+                .start()
+                .map_err(|e| StreamStatus::failed(StreamKind::System, e.to_string())),
         }
-
-        let mic = self
-            .mic
-            .start()
-            .map_err(|e| StreamStatus::failed(StreamKind::Mic, e.to_string()));
-        let system = self
-            .system
-            .start()
-            .map_err(|e| StreamStatus::failed(StreamKind::System, e.to_string()));
-
-        let initial = Readiness {
-            mic: mic.as_ref().map(StreamStatus::sample).unwrap_or_else(|e| e.clone()),
-            system: system
-                .as_ref()
-                .map(StreamStatus::sample)
-                .unwrap_or_else(|e| e.clone()),
-        };
-        self.store(initial.clone());
-
-        if mic.is_err() && system.is_err() {
-            return initial;
-        }
-
-        self.stop.store(false, Ordering::SeqCst);
-        let stop = Arc::clone(&self.stop);
-        let last = Arc::clone(&self.last);
-
-        self.worker = Some(thread::spawn(move || {
-            let mut mic = mic.ok();
-            let mut system = system.ok();
-            let mut tick: u32 = 0;
-
-            while !stop.load(Ordering::SeqCst) {
-                thread::sleep(TICK);
-
-                // M1 replaces these drains with the transcription pipeline.
-                // Until something consumes the rings they fill up and the drop
-                // counter climbs, which would make the meters lie.
-                let status = |handle: &mut Option<StreamHandle>, kind: StreamKind| match handle {
-                    Some(h) => {
-                        while h.consumer.pop().is_ok() {}
-                        StreamStatus::sample(h)
-                    }
-                    None => StreamStatus::stopped(kind),
-                };
-
-                let readiness = Readiness {
-                    mic: status(&mut mic, StreamKind::Mic),
-                    system: status(&mut system, StreamKind::System),
-                };
-
-                // Once a second, leave a diagnosable trace. Capture problems
-                // are reported by users as "it recorded nothing", and this is
-                // what turns that into an answer.
-                tick += 1;
-                if tick % (1000 / TICK.as_millis() as u32).max(1) == 0 {
-                    tracing::info!(
-                        mic = ?readiness.mic.verdict,
-                        mic_frames = readiness.mic.frames_captured,
-                        mic_dropped = readiness.mic.frames_dropped,
-                        system = ?readiness.system.verdict,
-                        system_frames = readiness.system.frames_captured,
-                        system_dropped = readiness.system.frames_dropped,
-                        "readiness"
-                    );
-                }
-
-                if let Ok(mut slot) = last.lock() {
-                    *slot = readiness.clone();
-                }
-                if app.emit(READINESS_EVENT, &readiness).is_err() {
-                    break;
-                }
-            }
-        }));
-
-        initial
     }
 
     pub fn stop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
         self.mic.stop();
         self.system.stop();
-        self.store(Readiness::idle());
-    }
-
-    fn store(&self, readiness: Readiness) {
-        match self.last.lock() {
-            Ok(mut slot) => *slot = readiness,
-            Err(poisoned) => *poisoned.into_inner() = readiness,
-        }
     }
 }
 

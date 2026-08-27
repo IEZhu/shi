@@ -3306,9 +3306,12 @@ dependencies = [
 name = "shi-app"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "serde",
  "serde_json",
  "shi-audio",
+ "shi-pipeline",
+ "shi-store",
  "tauri",
  "tauri-build",
  "thiserror 2.0.20",

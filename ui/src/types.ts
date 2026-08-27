@@ -1,4 +1,4 @@
-/// Mirrors `capture::StreamStatus` on the Rust side.
+/// Mirrors `capture::StreamStatus`.
 export type Verdict = "stopped" | "failed" | "noFrames" | "silent" | "ok";
 
 export interface StreamStatus {
@@ -17,6 +17,37 @@ export interface StreamStatus {
 export interface Readiness {
   mic: StreamStatus;
   system: StreamStatus;
+  /** Models the pipeline needs but cannot find. */
+  missingModels: string[];
+  recording: boolean;
+  /** Decode seconds per second of audio, once transcription has run. */
+  rtf: number | null;
+}
+
+/// Mirrors `session::TranscriptEvent`.
+export type TranscriptEvent =
+  | { kind: "draft"; stream: StreamName; startMs: number; text: string }
+  | {
+      kind: "final";
+      id: number;
+      stream: StreamName;
+      startMs: number;
+      endMs: number;
+      speaker: string | null;
+      text: string;
+    }
+  | { kind: "draftAbandoned"; stream: StreamName };
+
+export type StreamName = "mic" | "system";
+
+export interface Turn {
+  key: string;
+  stream: StreamName;
+  startMs: number;
+  speaker: string;
+  text: string;
+  /** Drafts are provisional and will be replaced by a final. */
+  draft: boolean;
 }
 
 export const VERDICT_LABEL: Record<Verdict, string> = {
@@ -28,7 +59,7 @@ export const VERDICT_LABEL: Record<Verdict, string> = {
 };
 
 /**
- * Why a stream is not usable, and what to do about it.
+ * Why a stream is unusable, and what to do about it.
  *
  * `silent` is the one that matters: macOS refuses system-audio capture by
  * returning an endless stream of zeroes rather than an error, so this is the
@@ -47,4 +78,15 @@ export function diagnose(status: StreamStatus): string | null {
     default:
       return null;
   }
+}
+
+export function formatOffset(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(Math.floor(total / 3600))}:${pad(Math.floor(total / 60) % 60)}:${pad(total % 60)}`;
+}
+
+/** Fallback names before diarization has anything to say. */
+export function defaultSpeaker(stream: StreamName): string {
+  return stream === "mic" ? "Вы" : "Собеседник";
 }

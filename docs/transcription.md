@@ -62,3 +62,32 @@ decode over a window that turns out to be silence simply returns nothing, so
 the draft path can re-decode the open utterance without a separate speech gate.
 The VAD still decides where utterances begin and end — it is just not on the
 critical path for drafts.
+
+## The echo problem, reproduced
+
+Running a full meeting through the built app with speech played over the
+built-in speakers produced this:
+
+```
+**[15:27:05] Собеседник:** Вчера мы выкатили релиз метрики ровные.
+**[15:27:08] Вы:**         Вчера мы выкатили релиз, не поли.
+```
+
+Every utterance appears twice. The system stream captured it digitally; the
+microphone picked the same sound out of the air a beat later. The transcript
+doubles, the second copy is worse, and a diarizer would conclude the local user
+said everything the remote side did.
+
+Three properties of the duplicate make it detectable:
+
+- it lags the original by the speaker-to-microphone flight time, well under 200 ms
+- it is strongly correlated with the system stream over that lag
+- it is quieter and band-limited compared to the direct capture
+
+So suppression is a cross-correlation between the two streams rather than
+anything model-shaped. Headphones make the problem disappear entirely, which is
+why the readiness panel should say so when the output device is built-in —
+`cpal` reports `InterfaceType::BuiltIn` versus `Bluetooth`/`Usb` for free.
+
+This is why the plan put echo handling in the MVP rather than in polish: without
+it the app is unusable in the configuration most people will first try.
