@@ -6,3 +6,5 @@ node_modules/
 /models
 /recordings
 .DS_Store
+ui/dist/
+src-tauri/gen/
