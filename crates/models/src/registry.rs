@@ -89,20 +89,25 @@ impl ModelSpec {
         }
     }
 
-    /// Whether it is already there.
+    /// Marker written once installation has completely finished.
+    ///
+    /// Its existence is the only thing that makes a model count as installed.
+    /// Judging by the files themselves cannot work: a half-extracted archive
+    /// has the right names in the right place, and handing a truncated model
+    /// to the runtime aborts the process rather than failing.
+    pub fn receipt_in(&self, models_dir: &Path) -> PathBuf {
+        models_dir.join(format!(".{}.installed", self.id))
+    }
+
+    /// Whether it is there and complete.
     pub fn installed(&self, models_dir: &Path) -> bool {
+        if !self.receipt_in(models_dir).is_file() {
+            return false;
+        }
         let path = self.path_in(models_dir);
         match self.install {
             Install::File(_) => path.is_file(),
-            // sherpa lays every recogniser out as a directory of ONNX files;
-            // an empty directory left by an interrupted extraction is not an
-            // installation.
-            Install::Archive(_) => {
-                path.is_dir()
-                    && std::fs::read_dir(&path)
-                        .map(|mut entries| entries.next().is_some())
-                        .unwrap_or(false)
-            }
+            Install::Archive(_) => path.is_dir(),
         }
     }
 }

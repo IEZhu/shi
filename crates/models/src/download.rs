@@ -46,6 +46,17 @@ pub fn install(
     let partial = models_dir.join(format!(".{}.part", spec.id));
     let already = fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
 
+    // A previous attempt may have downloaded everything and failed afterwards,
+    // during verification or extraction. Asking to resume from the end of a
+    // complete file earns a 416, so skip straight to checking it.
+    if already >= spec.download_bytes {
+        on_progress(Progress {
+            downloaded: already,
+            total: spec.download_bytes,
+        });
+        return finish(spec, models_dir, &partial);
+    }
+
     // Resuming saves the user from starting a 500 MB download over because a
     // hotel network dropped once.
     let mut request = ureq::get(spec.url);
@@ -111,31 +122,78 @@ pub fn install(
     file.flush()?;
     drop(file);
 
+    finish(spec, models_dir, &partial)
+}
+
+/// Verify a completed download and put it where the app looks for it.
+///
+/// Nothing becomes visible under the name the app uses until it is complete and
+/// checked. An earlier version extracted straight into place, so an interrupted
+/// unpack left every expected file present and one of them truncated — which
+/// passes every check and then aborts the process when the runtime opens it.
+fn finish(spec: &ModelSpec, models_dir: &Path, partial: &Path) -> Result<PathBuf> {
     // Hash the finished file rather than the stream: a resumed download has
     // bytes we never saw this time round.
-    let actual = sha256_of(&partial)?;
+    let actual = sha256_of(partial)?;
     if actual != spec.integrity.expected() {
-        // Keep nothing: a wrong file that survives will be resumed forever.
-        let _ = fs::remove_file(&partial);
+        // Keep nothing: a wrong file that survives would be resumed forever.
+        let _ = fs::remove_file(partial);
         return Err(ModelError::ChecksumMismatch {
             name: spec.display_name.to_string(),
         });
     }
 
     let destination = spec.path_in(models_dir);
+    let receipt = spec.receipt_in(models_dir);
+
+    // Whatever is there now is either absent or a failed attempt.
+    let _ = fs::remove_file(&receipt);
+
     match spec.install {
         Install::File(_) => {
-            fs::rename(&partial, &destination)?;
+            fs::rename(partial, &destination)?;
         }
         Install::Archive(_) => {
-            unpack(&partial, models_dir)?;
-            let _ = fs::remove_file(&partial);
+            let staging = models_dir.join(format!(".{}.unpacking", spec.id));
+            let _ = fs::remove_dir_all(&staging);
+            unpack(partial, &staging)?;
+
+            let name = destination
+                .file_name()
+                .ok_or_else(|| ModelError::Unpack {
+                    path: partial.to_path_buf(),
+                    source: std::io::Error::other("model has no directory name"),
+                })?;
+            let unpacked = staging.join(name);
+            if !unpacked.is_dir() {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(ModelError::Unpack {
+                    path: partial.to_path_buf(),
+                    source: std::io::Error::other(
+                        "the archive did not contain the expected directory",
+                    ),
+                });
+            }
+
+            // Rename is atomic within a filesystem: the model appears whole or
+            // not at all.
+            let _ = fs::remove_dir_all(&destination);
+            fs::rename(&unpacked, &destination)?;
+            let _ = fs::remove_dir_all(&staging);
+            let _ = fs::remove_file(partial);
         }
     }
 
+    // Written last. Its presence is what makes the model count as installed.
+    fs::write(&receipt, spec.integrity.expected())?;
+
     tracing::info!(
         model = spec.id,
-        verified = if spec.integrity.is_published() { "published digest" } else { "recorded digest" },
+        verified = if spec.integrity.is_published() {
+            "published digest"
+        } else {
+            "recorded digest"
+        },
         "model installed"
     );
     Ok(destination)
@@ -143,6 +201,7 @@ pub fn install(
 
 /// Remove an installed model.
 pub fn uninstall(spec: &ModelSpec, models_dir: &Path) -> Result<()> {
+    let _ = fs::remove_file(spec.receipt_in(models_dir));
     let path = spec.path_in(models_dir);
     match spec.install {
         Install::File(_) if path.is_file() => fs::remove_file(&path)?,

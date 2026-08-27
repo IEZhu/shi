@@ -159,7 +159,14 @@ impl Session {
     }
 
     pub fn readiness(&self) -> Readiness {
-        lock(&self.state).readiness.clone()
+        let mut readiness = lock(&self.state).readiness.clone();
+        // Recomputed rather than served from the snapshot: a download that
+        // finished since the last capture would otherwise leave the UI
+        // believing a model is still missing, or worse, already there.
+        if !self.is_running() {
+            readiness.missing_models = self.config.missing_models();
+        }
+        readiness
     }
 
     pub fn is_running(&self) -> bool {

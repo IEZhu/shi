@@ -120,3 +120,35 @@ why the readiness panel should say so when the output device is built-in —
 
 This is why the plan put echo handling in the MVP rather than in polish: without
 it the app is unusable in the configuration most people will first try.
+
+## A half-extracted model aborts the process
+
+Reported from a first real run: the app crashed on "start recording", with the
+stack ending in ONNX Runtime throwing out of `Ort::Session`.
+
+The recogniser had been downloaded through the model manager, and the user
+pressed start while the 464 MB archive was still being unpacked. The encoder was
+405 MB of an expected 652 MB. Three things combined:
+
+- extraction wrote straight into the directory the app looks in, so a
+  half-unpacked model was indistinguishable from a finished one
+- "installed" meant "the directory exists and is not empty", which a partly
+  extracted model satisfies perfectly
+- `OfflineRecognizer::create` does not return `None` for this failure — ONNX
+  Runtime **throws**, and a C++ exception crossing into Rust aborts the process
+
+The last one is the reason it was a crash rather than an error message, and it
+cannot be caught from Rust: the prebuilt sherpa-onnx archive ships libraries
+without headers, so there is nowhere to put a `try`/`catch`. The cause is
+removed instead:
+
+- archives extract to a staging directory and are moved into place with a
+  rename, which is atomic
+- installation finishes by writing a receipt, and only the receipt makes a model
+  count as installed
+
+The state was also unrecoverable: the truncated model still counted as
+installed, so every subsequent launch crashed the same way and the app never
+offered to fetch it again. A complete `.part` left by a failed install is now
+recognised too, since asking a server to resume from the end of a complete file
+earns a 416 rather than the bytes.
