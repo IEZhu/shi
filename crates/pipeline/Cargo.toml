@@ -1,0 +1,17 @@
+[package]
+name = "shi-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "VAD, resampling and speech recognition over captured audio"
+
+[dependencies]
+rubato = "5.0.0"
+sherpa-onnx = "1.13.6"
+shi-audio = { path = "../audio" }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hound = "3.5.1"
