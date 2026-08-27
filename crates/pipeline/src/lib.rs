@@ -20,6 +20,6 @@ pub use diarize::{
     SpeakerTracker, Thresholds, VoiceProfile,
 };
 pub use echo::{DEFAULT_ECHO_THRESHOLD, EchoReference};
-pub use engine::{StreamPipeline, VadSettings};
+pub use engine::{AudioTap, StreamPipeline, VadSettings};
 pub use event::PipelineEvent;
 pub use error::{PipelineError, Result};

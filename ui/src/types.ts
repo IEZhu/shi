@@ -147,6 +147,15 @@ export interface Settings {
   recognizerId: string;
   showDrafts: boolean;
   suppressEcho: boolean;
+  /** Days to keep meeting audio; zero keeps none. */
+  audioRetentionDays: number;
+}
+
+/** Mirrors `StorageUsage`. */
+export interface StorageUsage {
+  audioBytes: number;
+  retentionDays: number;
+  meetings: number;
 }
 
 export const KIND_LABEL: Record<CatalogueEntry["kind"], string> = {

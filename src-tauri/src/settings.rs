@@ -17,6 +17,9 @@ pub struct Settings {
     pub show_drafts: bool,
     /// Discard microphone audio that is the speakers coming back in.
     pub suppress_echo: bool,
+    /// Days to keep meeting audio. Zero means keep none, which turns off
+    /// re-diarization and re-transcription but costs no disk.
+    pub audio_retention_days: u32,
 }
 
 impl Default for Settings {
@@ -25,6 +28,9 @@ impl Default for Settings {
             recognizer_id: "parakeet-tdt-0.6b-v3-int8".into(),
             show_drafts: true,
             suppress_echo: true,
+            // Long enough to revisit last sprint's meetings, short enough that
+            // the folder does not quietly become the largest thing on the disk.
+            audio_retention_days: 14,
         }
     }
 }

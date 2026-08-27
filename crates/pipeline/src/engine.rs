@@ -16,6 +16,19 @@ use crate::event::PipelineEvent;
 /// Seconds of audio the VAD may buffer internally.
 const VAD_BUFFER_SECONDS: f32 = 30.0;
 
+/// Somewhere to keep the resampled audio, so the meeting can be re-processed
+/// later with a better model.
+///
+/// A trait rather than a concrete writer because the pipeline has no business
+/// knowing about file formats or retention policy; it only knows it has 16 kHz
+/// mono samples that someone wants.
+pub trait AudioTap: Send {
+    fn write(&mut self, samples: &[f32]);
+    /// Called once the stream ends. Consumes the tap so it cannot be written
+    /// to afterwards.
+    fn finish(self: Box<Self>);
+}
+
 /// What this stream does about acoustic echo.
 ///
 /// Without headphones the microphone re-records whatever the speakers play, so
@@ -80,6 +93,7 @@ pub struct StreamPipeline {
     suppressed: u64,
     /// Present only on the stream that carries several people.
     speakers: Option<SpeakerTracker>,
+    recorder: Option<Box<dyn AudioTap>>,
 }
 
 impl StreamPipeline {
@@ -132,12 +146,22 @@ impl StreamPipeline {
             echo: EchoRole::default(),
             suppressed: 0,
             speakers: None,
+            recorder: None,
         })
     }
 
     /// Measured decode cost per second of audio, for diagnostics.
     pub fn rtf(&self) -> f32 {
         self.cadence.rtf()
+    }
+
+    /// Keep this stream's audio, so the meeting can be re-processed later.
+    ///
+    /// Recorded after resampling rather than at the device rate: what gets
+    /// stored is then exactly what the models saw, so a later re-run cannot
+    /// disagree with the original for reasons of resampling.
+    pub fn record_to(&mut self, tap: Box<dyn AudioTap>) {
+        self.recorder = Some(tap);
     }
 
     /// Attribute utterances on this stream to individual voices.
@@ -206,6 +230,10 @@ impl StreamPipeline {
             return Vec::new();
         }
 
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.write(&resampled);
+        }
+
         if let EchoRole::Publish(reference) = &self.echo {
             reference.push(&resampled);
         }
@@ -221,8 +249,13 @@ impl StreamPipeline {
         events
     }
 
-    /// End of meeting: close any speech still buffered.
+    /// End of meeting: close any speech still buffered, and finish the
+    /// recording.
     pub fn flush(&mut self) -> Vec<PipelineEvent> {
+        if let Some(recorder) = self.recorder.take() {
+            recorder.finish();
+        }
+
         self.vad.flush();
         let mut events = self.collect_finals();
         if self.draft_showing {

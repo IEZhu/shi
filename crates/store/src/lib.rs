@@ -5,12 +5,14 @@
 //! fix every line they spoke, which is one UPDATE and a re-render rather than a
 //! rewrite of a file the user may have already edited.
 
+pub mod audio;
 pub mod error;
 pub mod markdown;
 pub mod model;
 mod schema;
 pub mod store;
 
+pub use audio::{AudioStore, RECORDING_SAMPLE_RATE, Recorder};
 pub use error::{Result, StoreError};
 pub use markdown::{MarkdownOptions, render, write_to};
 pub use model::{

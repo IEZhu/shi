@@ -7,6 +7,8 @@ rust-version.workspace = true
 description = "Meeting persistence: SQLite as the source of truth, Markdown as a projection"
 
 [dependencies]
+flacenc = "0.5.1"
+hound = "3.5.1"
 jiff = "0.2.35"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 shi-audio = { path = "../audio" }
@@ -14,4 +16,5 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+claxon = "0.4.3"
 tempfile = "3.27.0"

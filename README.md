@@ -17,7 +17,7 @@ diarization, which removes half the hard problem before a model runs.
 | M0 — capture + readiness panel | done |
 | M1 — transcription, storage, live transcript, echo suppression | done |
 | M2 — diarization and persistent voice profiles | done |
-| M3 — model manager done; archive, glossary and retention next | in progress |
+| M3 — model manager, archive, audio retention | done |
 | M4 — Windows and Linux ports | |
 
 Meetings transcribe end to end and are written to Markdown as they happen.
@@ -81,7 +81,7 @@ crates/audio/        AudioSource trait, ring buffers, mic (cpal), WAV FileSource
 crates/audio/objc/   Core Audio process-tap shim (macOS)
 crates/pipeline/     resampling, VAD, recognition, draft cadence, echo suppression,
                      speaker tracking
-crates/store/        SQLite schema, full-text search, the Markdown projection
+crates/store/        SQLite schema, full-text search, Markdown, meeting audio
 crates/models/       catalogue, verified downloads, install and removal
 src-tauri/           app shell, session orchestration, commands
 ui/                  React frontend

@@ -369,6 +369,28 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Meetings that started before `cutoff`, for pruning their audio.
+    ///
+    /// Compares the stored timestamp as a string, which works because it is
+    /// always written in a fixed-width, zone-annotated format that sorts
+    /// chronologically for a given zone. The cutoff is produced the same way.
+    pub fn meetings_started_before(&self, cutoff: &str) -> Result<Vec<i64>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id, started_at FROM meetings")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let cutoff_instant = instant_of(cutoff);
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|(_, started)| instant_of(started) < cutoff_instant)
+            .map(|(id, _)| id)
+            .collect())
+    }
+
     /// Remove a meeting and everything recorded with it.
     pub fn delete_meeting(&self, meeting_id: i64) -> Result<()> {
         self.connection
@@ -442,6 +464,19 @@ impl Store {
         transaction.commit()?;
         Ok(speaker)
     }
+}
+
+/// Compare timestamps as instants rather than text.
+///
+/// Two meetings in different time zones sort wrongly as strings, and a laptop
+/// that travels produces exactly that. Anything unparseable sorts as the epoch,
+/// so a corrupt row is pruned rather than kept forever.
+fn instant_of(value: &str) -> i128 {
+    value
+        .parse::<jiff::Zoned>()
+        .map(|z| z.timestamp().as_nanosecond())
+        .or_else(|_| value.parse::<jiff::Timestamp>().map(|t| t.as_nanosecond()))
+        .unwrap_or(i128::MIN)
 }
 
 /// Turn what a person typed into an FTS5 query.

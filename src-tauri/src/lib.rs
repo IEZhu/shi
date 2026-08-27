@@ -347,6 +347,39 @@ fn delete_meeting(state: State<'_, AppState>, meeting_id: i64) -> Result<(), App
     Ok(())
 }
 
+// ---- storage -----------------------------------------------------------
+
+/// What the app is using on disk, and for how long it keeps it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageUsage {
+    audio_bytes: u64,
+    retention_days: u32,
+    meetings: usize,
+}
+
+#[tauri::command]
+fn storage_usage(state: State<'_, AppState>) -> Result<StorageUsage, AppError> {
+    let session = lock_session(&state);
+    let store = session.store();
+    let meetings = {
+        let guard = store.lock().unwrap_or_else(|p| p.into_inner());
+        guard.meetings()?.len()
+    };
+
+    Ok(StorageUsage {
+        audio_bytes: session.audio_usage_bytes(),
+        retention_days: session.config().settings.audio_retention_days,
+        meetings,
+    })
+}
+
+/// Apply the retention setting now rather than waiting for the next launch.
+#[tauri::command]
+fn prune_audio(state: State<'_, AppState>) -> u64 {
+    lock_session(&state).prune_audio()
+}
+
 // ---- models ------------------------------------------------------------
 
 #[tauri::command]
@@ -473,6 +506,8 @@ pub fn run() {
             meeting_transcript,
             search,
             delete_meeting,
+            storage_usage,
+            prune_audio,
             model_catalogue,
             install_model,
             cancel_model_install,

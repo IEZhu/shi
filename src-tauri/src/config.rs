@@ -69,6 +69,12 @@ impl Config {
         self.data_dir.join("meetings.db")
     }
 
+    /// Where meeting audio is kept, separate from the database so it can be
+    /// pruned, moved or excluded from a backup on its own.
+    pub fn audio_dir(&self) -> PathBuf {
+        self.data_dir.join("audio")
+    }
+
     pub fn silero(&self) -> PathBuf {
         self.model_path("silero-vad")
     }

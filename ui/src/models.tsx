@@ -5,6 +5,8 @@ import {
   type CatalogueEntry,
   type InstallProgress,
   KIND_LABEL,
+  type Settings,
+  type StorageUsage,
   formatBytes,
 } from "./types";
 
@@ -17,11 +19,21 @@ import {
 export function ModelManager({ onClose }: { onClose: () => void }) {
   const [entries, setEntries] = useState<CatalogueEntry[]>([]);
   const [progress, setProgress] = useState<Record<string, InstallProgress>>({});
+  const [usage, setUsage] = useState<StorageUsage | null>(null);
   const unlisten = useRef<(() => void) | null>(null);
 
   const refresh = useCallback(async () => {
     setEntries(await invoke<CatalogueEntry[]>("model_catalogue"));
+    setUsage(await invoke<StorageUsage>("storage_usage"));
   }, []);
+
+  const setRetention = async (days: number) => {
+    const current = await invoke<Settings>("settings");
+    await invoke("save_settings", {
+      settings: { ...current, audioRetentionDays: days },
+    });
+    refresh();
+  };
 
   useEffect(() => {
     refresh();
@@ -67,7 +79,7 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
     <section className="review models">
       <header>
         <div>
-          <h2>Модели</h2>
+          <h2>Модели и хранилище</h2>
           <p className="subtitle">
             Всё распознавание идёт на этой машине, поэтому модели нужно скачать один раз.
           </p>
@@ -76,6 +88,42 @@ export function ModelManager({ onClose }: { onClose: () => void }) {
           Закрыть
         </button>
       </header>
+
+      {usage && (
+        <div className="model-group">
+          <h3>Записи встреч</h3>
+          <p className="excerpt">
+            Аудио хранится, чтобы можно было пересобрать диаризацию или
+            перетранскрибировать встречу лучшей моделью. Сейчас занято{" "}
+            <strong>{formatBytes(usage.audioBytes)}</strong> за {usage.meetings}{" "}
+            встреч.
+          </p>
+          <div className="toast-row">
+            <label className="retention">
+              Хранить
+              <select
+                value={usage.retentionDays}
+                onChange={(event) => setRetention(Number(event.target.value))}
+              >
+                <option value={0}>не хранить</option>
+                <option value={7}>7 дней</option>
+                <option value={14}>14 дней</option>
+                <option value={30}>30 дней</option>
+                <option value={90}>90 дней</option>
+              </select>
+            </label>
+            <button
+              className="ghost"
+              onClick={async () => {
+                await invoke("prune_audio");
+                refresh();
+              }}
+            >
+              Удалить устаревшее
+            </button>
+          </div>
+        </div>
+      )}
 
       {groups.map((kind) => {
         const inGroup = entries.filter((entry) => entry.kind === kind);

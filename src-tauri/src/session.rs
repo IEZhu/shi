@@ -6,10 +6,10 @@ use std::time::Duration;
 use serde::Serialize;
 use shi_audio::{StreamHandle, StreamKind};
 use shi_pipeline::{
-    Attribution, EchoReference, PipelineEvent, SherpaTranscriber, SpeakerTracker,
+    Attribution, AudioTap, EchoReference, PipelineEvent, SherpaTranscriber, SpeakerTracker,
     StreamPipeline, Thresholds, Transcriber, VadSettings, VoiceProfile,
 };
-use shi_store::{NewSegment, SessionSlot, Store, markdown};
+use shi_store::{AudioStore, NewSegment, Recorder, SessionSlot, Store, markdown};
 use tauri::{AppHandle, Emitter};
 
 use crate::capture::{Capture, Readiness, StreamStatus, StartedStreams, READINESS_EVENT};
@@ -56,10 +56,27 @@ pub enum TranscriptEvent {
 }
 
 /// A meeting in progress, or the absence of one.
+/// Lets the pipeline write recordings without knowing about files or retention.
+struct RecorderTap(Recorder);
+
+impl AudioTap for RecorderTap {
+    fn write(&mut self, samples: &[f32]) {
+        self.0.write(samples);
+    }
+
+    fn finish(self: Box<Self>) {
+        match self.0.finish() {
+            Ok(path) => tracing::info!(file = %path.display(), "recording compressed"),
+            Err(err) => tracing::error!("cannot finish a recording: {err}"),
+        }
+    }
+}
+
 pub struct Session {
     config: Config,
     capture: Capture,
     store: Arc<Mutex<Store>>,
+    audio: AudioStore,
     state: Arc<Mutex<SessionState>>,
     stop: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
@@ -88,18 +105,57 @@ impl Session {
         config.ensure_dirs()?;
         let store = Store::open(config.database())?;
         let readiness = Readiness::idle(config.missing_models());
+        let config_audio_dir = config.audio_dir();
 
-        Ok(Self {
+        let session = Self {
             config,
             capture: Capture::new(),
             store: Arc::new(Mutex::new(store)),
+            audio: AudioStore::new(config_audio_dir),
             state: Arc::new(Mutex::new(SessionState {
                 readiness,
                 meeting_id: None,
             })),
             stop: Arc::new(AtomicBool::new(false)),
             workers: Vec::new(),
-        })
+        };
+
+        // A crash leaves an uncompressed recording behind, which would fill the
+        // disk at several times the intended rate if nobody ever finished it.
+        session.audio.compress_orphans();
+        session.prune_audio();
+
+        Ok(session)
+    }
+
+    /// Delete audio older than the retention the user chose.
+    ///
+    /// Transcripts are untouched: they are small and are the point, while audio
+    /// is a means to re-processing and is what actually fills a disk.
+    pub fn prune_audio(&self) -> u64 {
+        let days = self.config.settings.audio_retention_days;
+        let cutoff = jiff::Zoned::now()
+            .checked_sub(jiff::Span::new().days(i64::from(days)))
+            .ok()
+            .map(|z| z.to_string());
+
+        let Some(cutoff) = cutoff else {
+            tracing::warn!(days, "cannot compute a retention cutoff");
+            return 0;
+        };
+
+        let stale = match lock(&self.store).meetings_started_before(&cutoff) {
+            Ok(ids) => ids,
+            Err(err) => {
+                tracing::error!("cannot find meetings to prune: {err}");
+                return 0;
+            }
+        };
+        self.audio.prune(&stale)
+    }
+
+    pub fn audio_usage_bytes(&self) -> u64 {
+        self.audio.usage_bytes()
     }
 
     pub fn readiness(&self) -> Readiness {
@@ -214,6 +270,7 @@ impl Session {
         let stop = Arc::clone(&self.stop);
         let store = Arc::clone(&self.store);
         let config = self.config.clone();
+        let audio = AudioStore::new(config.audio_dir());
 
         // Only build the heavy machinery when there is a meeting to transcribe;
         // a readiness check should not spend 600 MB and a model load.
@@ -233,6 +290,20 @@ impl Session {
 
                 // The system stream is the reference; the microphone is what
                 // gets contaminated by it.
+                // Keep the audio only if the user asked for it: with a
+                // retention of zero there is nothing to re-process later, so
+                // writing it would be pure cost.
+                if let Some(meeting_id) = meeting_id
+                    && config.settings.audio_retention_days > 0
+                {
+                    match audio.recorder(meeting_id, kind) {
+                        Ok(recorder) => pipeline.record_to(Box::new(RecorderTap(recorder))),
+                        Err(err) => {
+                            tracing::error!(stream = %kind, "cannot record audio: {err}")
+                        }
+                    }
+                }
+
                 match kind {
                     StreamKind::System => {
                         pipeline.publish_echo_reference(echo);
@@ -412,9 +483,18 @@ impl Session {
         if self.is_running() {
             return Err(AppError::BusyRecording);
         }
+        let shortened =
+            settings.audio_retention_days < self.config.settings.audio_retention_days;
+
         settings.save(&self.config.data_dir)?;
         self.config.settings = settings;
         self.set_readiness(Readiness::idle(self.config.missing_models()));
+
+        // Shortening retention should free the disk now: a setting that only
+        // takes effect on the next launch looks broken.
+        if shortened {
+            self.prune_audio();
+        }
         Ok(())
     }
 
