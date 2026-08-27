@@ -32,7 +32,7 @@ pub struct CatalogueEntry {
 
 /// How an install is going.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state", rename_all = "camelCase")]
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum InstallProgress {
     Downloading {
         id: String,

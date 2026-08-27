@@ -1,12 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use shi_audio::{StreamHandle, StreamKind};
 use shi_pipeline::{
-    Attribution, AudioTap, EchoReference, PipelineEvent, SherpaTranscriber, SpeakerTracker,
+    Attribution, AudioTap, EchoReference, LiveNames, PipelineEvent, SherpaTranscriber, SpeakerTracker,
     StreamPipeline, Thresholds, Transcriber, VadSettings, VoiceProfile,
 };
 use shi_store::{AudioStore, NewSegment, Recorder, SessionSlot, Store, markdown};
@@ -27,8 +27,13 @@ const IDLE_SLEEP: Duration = Duration::from_millis(10);
 const READ_CHUNK: usize = 1024;
 
 /// What the transcript view receives.
+///
+/// `rename_all_fields` is load-bearing: on an internally tagged enum,
+/// `rename_all` renames the *variants* only. Without it `start_ms` reached the
+/// UI unchanged while single-word fields happened to match, so timestamps —
+/// and only timestamps — arrived as undefined.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum TranscriptEvent {
     /// Provisional text for an utterance still being spoken. Always replaced.
     Draft {
@@ -80,6 +85,8 @@ pub struct Session {
     state: Arc<Mutex<SessionState>>,
     stop: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
+    /// Voices the user names while the meeting is still running.
+    live_names: LiveNames,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +125,7 @@ impl Session {
             })),
             stop: Arc::new(AtomicBool::new(false)),
             workers: Vec::new(),
+            live_names: Arc::new(Mutex::new(Vec::new())),
         };
 
         // A crash leaves an uncompressed recording behind, which would fill the
@@ -229,6 +237,28 @@ impl Session {
             None => None,
         };
 
+        // One recogniser, shared. Loading it per stream cost 650 MB twice and,
+        // worse, started the two workers seconds apart — which put their
+        // transcripts on different timelines and left the echo detector
+        // comparing the wrong moments. sherpa-onnx declares the recogniser
+        // `Sync`, so sharing it is what the library intends.
+        let transcriber: Option<Arc<dyn Transcriber>> = match meeting_id {
+            Some(_) => Some(Arc::new(SherpaTranscriber::load(
+                &self.config.recognizer(),
+                self.config.asr_threads,
+            )?)),
+            None => None,
+        };
+
+        // Taken after the model is in memory, so both streams start together
+        // and share one origin.
+        let origin = Instant::now();
+
+        // A meeting starts with nobody named yet.
+        if let Ok(mut pending) = self.live_names.lock() {
+            pending.clear();
+        }
+
         self.stop.store(false, Ordering::SeqCst);
         let pipeline_stats: SharedStats = Arc::new(Mutex::new(PipelineStats::default()));
         // One reference, shared: the system stream fills it and the microphone
@@ -251,6 +281,9 @@ impl Session {
                         meeting_id,
                         Arc::clone(&pipeline_stats),
                         Arc::clone(&echo),
+                        origin,
+                        transcriber.clone(),
+                        Arc::clone(&self.live_names),
                     )?);
                 }
                 Err(status) => meters.push(Err(status)),
@@ -272,6 +305,9 @@ impl Session {
         meeting_id: Option<i64>,
         stats: SharedStats,
         echo: Arc<EchoReference>,
+        origin: Instant,
+        transcriber: Option<Arc<dyn Transcriber>>,
+        live_names: LiveNames,
     ) -> Result<JoinHandle<()>, AppError> {
         let kind = handle.info.kind;
         let stop = Arc::clone(&self.stop);
@@ -281,12 +317,8 @@ impl Session {
 
         // Only build the heavy machinery when there is a meeting to transcribe;
         // a readiness check should not spend 600 MB and a model load.
-        let pipeline = match meeting_id {
-            Some(_) => {
-                let transcriber: Arc<dyn Transcriber> = Arc::new(SherpaTranscriber::load(
-                    &config.recognizer(),
-                    config.asr_threads,
-                )?);
+        let pipeline = match transcriber {
+            Some(transcriber) => {
                 let mut pipeline = StreamPipeline::new(
                     kind,
                     handle.info.sample_rate,
@@ -294,9 +326,10 @@ impl Session {
                     transcriber,
                     VadSettings::default(),
                 )?;
+                // Both streams share one origin, so their transcripts line up
+                // and the echo detector is comparing the same moment.
+                pipeline.started_at(origin);
 
-                // The system stream is the reference; the microphone is what
-                // gets contaminated by it.
                 // Keep the audio only if the user asked for it: with a
                 // retention of zero there is nothing to re-process later, so
                 // writing it would be pure cost.
@@ -311,6 +344,8 @@ impl Session {
                     }
                 }
 
+                // The system stream is the reference; the microphone is what
+                // gets contaminated by it.
                 match kind {
                     StreamKind::System => {
                         pipeline.publish_echo_reference(echo);
@@ -318,7 +353,10 @@ impl Session {
                         // needs a tracker. That asymmetry is the payoff for
                         // capturing the two sources separately.
                         match build_tracker(&config, &store) {
-                            Ok(tracker) => pipeline.identify_speakers(tracker),
+                            Ok(tracker) => {
+                                pipeline.identify_speakers(tracker);
+                                pipeline.accept_names_from(live_names);
+                            }
                             Err(err) => tracing::error!("speaker tracking disabled: {err}"),
                         }
                     }
@@ -472,6 +510,17 @@ impl Session {
         readiness.meeting_id = meeting_id;
         self.set_readiness(readiness.clone());
         readiness
+    }
+
+    /// Tell a running meeting that a voice now has a name.
+    ///
+    /// Without this the database and the transcript agree about the past and
+    /// disagree about everything said afterwards: the tracker keeps calling
+    /// that person by their speaker number for the rest of the call.
+    pub fn note_named_voice(&self, slot: u32, speaker_id: i64, name: &str) {
+        if let Ok(mut pending) = self.live_names.lock() {
+            pending.push((slot, speaker_id, name.to_string()));
+        }
     }
 
     pub fn store(&self) -> Arc<Mutex<Store>> {
@@ -711,4 +760,59 @@ fn render_markdown(store: &Arc<Mutex<Store>>, config: &Config, meeting_id: i64) 
 /// than inherit the panic.
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frontend reads these names directly, and a mismatch is invisible
+    /// from Rust: it shows up as `undefined` in the UI. On an internally
+    /// tagged enum `rename_all` renames only the variants, so timestamps once
+    /// arrived as `start_ms` and rendered as NaN while every single-word field
+    /// happened to line up.
+    #[test]
+    fn transcript_events_use_the_names_the_frontend_expects() {
+        let event = TranscriptEvent::Final {
+            id: 1,
+            stream: "system".into(),
+            start_ms: 1_234,
+            end_ms: 5_678,
+            speaker: Some("Мария".into()),
+            slot: Some(2),
+            text: "Привет.".into(),
+        };
+
+        let json = serde_json::to_value(&event).expect("serialise");
+        let object = json.as_object().expect("an object");
+
+        for field in ["kind", "id", "stream", "startMs", "endMs", "speaker", "slot", "text"] {
+            assert!(object.contains_key(field), "missing {field} in {json}");
+        }
+        assert!(!object.contains_key("start_ms"), "snake_case leaked: {json}");
+        assert_eq!(object["kind"], "final");
+        assert_eq!(object["startMs"], 1_234);
+    }
+
+    #[test]
+    fn draft_events_use_the_same_names() {
+        let json = serde_json::to_value(TranscriptEvent::Draft {
+            stream: "mic".into(),
+            start_ms: 42,
+            text: "…".into(),
+        })
+        .expect("serialise");
+
+        assert_eq!(json["kind"], "draft");
+        assert_eq!(json["startMs"], 42);
+        assert!(json.get("start_ms").is_none());
+    }
+
+    #[test]
+    fn speaker_discovery_reaches_the_frontend_by_that_name() {
+        let json =
+            serde_json::to_value(TranscriptEvent::SpeakerDiscovered { slot: 3 }).expect("serialise");
+        assert_eq!(json["kind"], "speakerDiscovered");
+        assert_eq!(json["slot"], 3);
+    }
 }

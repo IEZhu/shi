@@ -286,3 +286,135 @@ fn a_recording_of_one_person_yields_one_voice() {
         assignments.iter().map(|(_, slot)| *slot).collect();
     assert_eq!(slots.len(), 1, "one speaker was split into {slots:?}");
 }
+
+#[test]
+fn a_recognised_voice_keeps_its_name_for_the_whole_meeting() {
+    // Reported from a real run: the same person appeared as "Маша" on one line
+    // and "Спикер 1" on the next. Utterances vary, and checking each one
+    // against the stored profile independently lets some fall below the
+    // threshold. The first confident match must bind the name to the voice.
+    let Some(mut tracker) = tracker() else {
+        eprintln!("skipping: speaker model absent — run scripts/fetch-models.sh");
+        return;
+    };
+
+    let (enrolment, _) = clip("Milena_1");
+    let embedding = tracker.embed(&enrolment).expect("embed");
+    tracker.load_profiles(vec![VoiceProfile {
+        speaker_id: 7,
+        name: "Мария".into(),
+        embeddings: vec![embedding],
+    }]);
+
+    // The enrolled utterance, then a different one from the same voice, then a
+    // short interjection — every one of them should say Мария.
+    let mut seen = Vec::new();
+    for name in ["Milena_1", "Milena_2"] {
+        let (samples, duration) = clip(name);
+        seen.push(tracker.attribute(&samples, duration));
+    }
+    let (samples, _) = clip("Milena_1");
+    seen.push(tracker.attribute(
+        &samples[..(0.3 * 16_000.0) as usize],
+        Duration::from_millis(300),
+    ));
+
+    for (index, attribution) in seen.iter().enumerate() {
+        match attribution {
+            Attribution::Known { name, speaker_id } => {
+                assert_eq!(name, "Мария", "utterance {index}");
+                assert_eq!(*speaker_id, 7);
+            }
+            other => panic!("utterance {index} lost the name: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn binding_a_name_does_not_capture_a_different_voice() {
+    // The other half: making identity sticky must not make it greedy.
+    let Some(mut tracker) = tracker() else {
+        eprintln!("skipping: speaker model absent");
+        return;
+    };
+
+    let (enrolment, _) = clip("Milena_1");
+    let embedding = tracker.embed(&enrolment).expect("embed");
+    tracker.load_profiles(vec![VoiceProfile {
+        speaker_id: 7,
+        name: "Мария".into(),
+        embeddings: vec![embedding],
+    }]);
+
+    let (milena, milena_len) = clip("Milena_1");
+    tracker.attribute(&milena, milena_len);
+
+    // Lesya is the closest other voice in the corpus.
+    let (lesya, lesya_len) = clip("Lesya_1");
+    match tracker.attribute(&lesya, lesya_len) {
+        Attribution::Known { name, .. } => panic!("a different speaker became {name}"),
+        _ => {}
+    }
+}
+
+#[test]
+fn naming_a_voice_mid_meeting_applies_to_everything_said_after() {
+    // Reported from a real run: the user named two voices during the call and
+    // every later line still said "Спикер 1" and "Спикер 2". Naming writes to
+    // the database and fixes the past, but the tracker runs on another thread
+    // and never heard about it.
+    let Some(mut tracker) = tracker() else {
+        eprintln!("skipping: speaker model absent — run scripts/fetch-models.sh");
+        return;
+    };
+
+    let names: shi_pipeline::LiveNames = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    tracker.accept_names_from(std::sync::Arc::clone(&names));
+
+    // A voice speaks and opens a slot.
+    let (first, first_len) = clip("Milena_1");
+    let opened = match tracker.attribute(&first, first_len) {
+        Attribution::Slot { id, .. } => id,
+        other => panic!("expected a new voice, got {other:?}"),
+    };
+
+    // The user names it while the meeting is still running.
+    names.lock().expect("lock").push((opened, 11, "Мария".into()));
+
+    // Everything that voice says from here on carries the name.
+    let (second, second_len) = clip("Milena_2");
+    match tracker.attribute(&second, second_len) {
+        Attribution::Known { speaker_id, name } => {
+            assert_eq!(name, "Мария");
+            assert_eq!(speaker_id, 11);
+        }
+        other => panic!("the name did not reach the running meeting: {other:?}"),
+    }
+}
+
+#[test]
+fn naming_one_voice_leaves_the_others_alone() {
+    let Some(mut tracker) = tracker() else {
+        eprintln!("skipping: speaker model absent");
+        return;
+    };
+
+    let names: shi_pipeline::LiveNames = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    tracker.accept_names_from(std::sync::Arc::clone(&names));
+
+    let (milena, milena_len) = clip("Milena_1");
+    let milena_slot = match tracker.attribute(&milena, milena_len) {
+        Attribution::Slot { id, .. } => id,
+        other => panic!("expected a slot: {other:?}"),
+    };
+    let (daniel, daniel_len) = clip("Daniel_1");
+    tracker.attribute(&daniel, daniel_len);
+
+    names.lock().expect("lock").push((milena_slot, 11, "Мария".into()));
+
+    let (daniel_again, daniel_again_len) = clip("Daniel_2");
+    match tracker.attribute(&daniel_again, daniel_again_len) {
+        Attribution::Known { name, .. } => panic!("an unnamed voice became {name}"),
+        _ => {}
+    }
+}

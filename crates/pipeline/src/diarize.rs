@@ -1,3 +1,4 @@
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sherpa_onnx::{SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig};
@@ -72,6 +73,14 @@ pub struct SessionSlot {
     weight: f32,
     pub total_speech: Duration,
     pub utterances: u32,
+    /// Set once this voice has been recognised as somebody already named.
+    ///
+    /// Identity has to hold for a whole meeting. Checking every utterance
+    /// against the stored profile independently makes the same person appear
+    /// as "Мария" on one line and "Спикер 1" on the next, because utterances
+    /// vary and some land below the threshold. The first confident match binds
+    /// the name to the voice; the rest follow the voice.
+    pub known: Option<(i64, String)>,
 }
 
 /// Who an utterance belongs to.
@@ -89,6 +98,13 @@ pub enum Attribution {
     Unknown,
 }
 
+/// Names given to voices while the meeting is still running.
+///
+/// Naming a voice mid-meeting writes to the database and fixes the lines
+/// already spoken, but the tracker is running on another thread and would
+/// otherwise keep calling that person "Спикер 2" for the rest of the call.
+pub type LiveNames = Arc<Mutex<Vec<(u32, i64, String)>>>;
+
 /// Tracks who is speaking on one stream.
 pub struct SpeakerTracker {
     extractor: SpeakerEmbeddingExtractor,
@@ -97,6 +113,7 @@ pub struct SpeakerTracker {
     thresholds: Thresholds,
     next_slot: u32,
     last_slot: Option<u32>,
+    live_names: Option<LiveNames>,
 }
 
 impl SpeakerTracker {
@@ -117,7 +134,33 @@ impl SpeakerTracker {
             thresholds,
             next_slot: 1,
             last_slot: None,
+            live_names: None,
         })
+    }
+
+    /// Watch for voices the user names while the meeting runs.
+    pub fn accept_names_from(&mut self, names: LiveNames) {
+        self.live_names = Some(names);
+    }
+
+    /// Apply anything the user has named since the last utterance.
+    fn take_live_names(&mut self) {
+        let Some(queue) = &self.live_names else {
+            return;
+        };
+        let pending: Vec<(u32, i64, String)> = {
+            let Ok(mut queue) = queue.lock() else {
+                return;
+            };
+            std::mem::take(&mut *queue)
+        };
+
+        for (slot_id, speaker_id, name) in pending {
+            if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == slot_id) {
+                tracing::debug!(slot = slot_id, %name, "voice named during the meeting");
+                slot.known = Some((speaker_id, name));
+            }
+        }
     }
 
     /// Load the voices the user has already named.
@@ -145,32 +188,25 @@ impl SpeakerTracker {
     /// Decide who spoke an utterance, learning from it when it is long enough
     /// to be evidence.
     pub fn attribute(&mut self, samples: &[f32], duration: Duration) -> Attribution {
+        self.take_live_names();
+
         if duration < MIN_FOR_EVIDENCE {
-            return match self.last_slot {
-                Some(id) => Attribution::Continuation { id },
-                None => Attribution::Unknown,
-            };
+            return self.carry_on();
         }
 
         let Some(embedding) = self.embed(samples) else {
-            return self
-                .last_slot
-                .map_or(Attribution::Unknown, |id| Attribution::Continuation { id });
+            return self.carry_on();
         };
 
-        // A named voice wins over an unnamed one: the user already told us who
-        // this is, and re-asking would be worse than a rare mistake.
-        if let Some(profile) = self
+        // A confident match against a stored profile wins: the user already
+        // told us who this is.
+        let matched_profile = self
             .profiles
             .iter()
-            .max_by(|a, b| a.similarity(&embedding).total_cmp(&b.similarity(&embedding)))
-            .filter(|p| p.similarity(&embedding) >= self.thresholds.known)
-        {
-            return Attribution::Known {
-                speaker_id: profile.speaker_id,
-                name: profile.name.clone(),
-            };
-        }
+            .map(|profile| (profile, profile.similarity(&embedding)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .filter(|(_, score)| *score >= self.thresholds.known)
+            .map(|(profile, _)| (profile.speaker_id, profile.name.clone()));
 
         let best = self
             .slots
@@ -179,22 +215,56 @@ impl SpeakerTracker {
             .map(|(index, slot)| (index, cosine(&slot.centroid, &embedding)))
             .max_by(|a, b| a.1.total_cmp(&b.1));
 
+        if let Some((speaker_id, name)) = matched_profile {
+            // Bind the name to a voice in this meeting, so later utterances
+            // that fall short of the profile threshold still carry it.
+            let slot = match best.filter(|(_, score)| *score >= self.thresholds.session) {
+                Some((index, _)) => {
+                    self.slots[index].absorb(&embedding, duration);
+                    &mut self.slots[index]
+                }
+                None => {
+                    let id = self.next_slot;
+                    self.next_slot += 1;
+                    self.slots.push(SessionSlot {
+                        id,
+                        centroid: embedding,
+                        weight: duration.as_secs_f32(),
+                        total_speech: duration,
+                        utterances: 1,
+                        known: None,
+                    });
+                    self.slots.last_mut().expect("just pushed")
+                }
+            };
+            slot.known = Some((speaker_id, name.clone()));
+            self.last_slot = Some(slot.id);
+            return Attribution::Known { speaker_id, name };
+        }
+
         if let Some((index, score)) = best
             && score >= self.thresholds.session
         {
             let slot = &mut self.slots[index];
             slot.absorb(&embedding, duration);
             self.last_slot = Some(slot.id);
-            return Attribution::Slot {
-                id: slot.id,
-                is_new: false,
+
+            // A voice already recognised keeps its name even when this
+            // particular utterance would not have matched the profile alone.
+            return match &slot.known {
+                Some((speaker_id, name)) => Attribution::Known {
+                    speaker_id: *speaker_id,
+                    name: name.clone(),
+                },
+                None => Attribution::Slot {
+                    id: slot.id,
+                    is_new: false,
+                },
             };
         }
 
         if duration < MIN_FOR_NEW_SLOT {
-            return self
-                .last_slot
-                .map_or(Attribution::Unknown, |id| Attribution::Continuation { id });
+            return self.carry_on();
         }
 
         let id = self.next_slot;
@@ -205,10 +275,32 @@ impl SpeakerTracker {
             weight: duration.as_secs_f32(),
             total_speech: duration,
             utterances: 1,
+            known: None,
         });
         self.last_slot = Some(id);
 
         Attribution::Slot { id, is_new: true }
+    }
+
+    /// Attribute an utterance too short to judge to whoever holds the floor.
+    ///
+    /// If that voice has a name, the interjection carries it: a two-word "угу"
+    /// from someone already identified should not appear under a speaker
+    /// number.
+    fn carry_on(&self) -> Attribution {
+        let Some(id) = self.last_slot else {
+            return Attribution::Unknown;
+        };
+        match self.slots.iter().find(|slot| slot.id == id) {
+            Some(SessionSlot {
+                known: Some((speaker_id, name)),
+                ..
+            }) => Attribution::Known {
+                speaker_id: *speaker_id,
+                name: name.clone(),
+            },
+            _ => Attribution::Continuation { id },
+        }
     }
 
     /// Slots whose centroids are close enough that they are probably one

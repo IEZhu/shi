@@ -8,7 +8,7 @@ use shi_audio::StreamKind;
 
 use crate::asr::{ASR_SAMPLE_RATE, Transcriber};
 use crate::cadence::Cadence;
-use crate::diarize::{SessionSlot, SpeakerTracker};
+use crate::diarize::{LiveNames, SessionSlot, SpeakerTracker};
 use crate::echo::EchoReference;
 use crate::error::{PipelineError, Result};
 use crate::event::PipelineEvent;
@@ -100,7 +100,13 @@ pub struct StreamPipeline {
     /// Total 16 kHz samples handed to the VAD, and the clock for timestamps.
     consumed: u64,
     last_draft: Option<Instant>,
-    /// When capture began, against which the sample clock is reconciled.
+    /// When *capture* began — not when this pipeline was built.
+    ///
+    /// The two streams construct their pipelines at different moments, because
+    /// each loads a recogniser first. Timing each from its own construction put
+    /// their transcripts seconds apart, which both misorders the conversation
+    /// and defeats echo suppression, since the same sound then appears at
+    /// different times on the two timelines.
     started: Instant,
     /// Whether a draft is currently on screen awaiting its final.
     draft_showing: bool,
@@ -189,6 +195,13 @@ impl StreamPipeline {
         self.speakers = Some(tracker);
     }
 
+    /// Let names given during the meeting reach the tracker.
+    pub fn accept_names_from(&mut self, names: LiveNames) {
+        if let Some(tracker) = self.speakers.as_mut() {
+            tracker.accept_names_from(names);
+        }
+    }
+
     /// Voices heard so far, for persisting between utterances.
     pub fn speaker_slots(&self) -> &[SessionSlot] {
         self.speakers.as_ref().map_or(&[], |t| t.slots())
@@ -212,6 +225,13 @@ impl StreamPipeline {
     /// on the microphone stream.
     pub fn suppress_echo_of(&mut self, reference: Arc<EchoReference>) {
         self.echo = EchoRole::Suppress(reference);
+    }
+
+    /// Anchor this stream's timeline to when capture began.
+    ///
+    /// Both streams must share one origin or nothing that compares them can work.
+    pub fn started_at(&mut self, origin: Instant) {
+        self.started = origin;
     }
 
     /// Utterances discarded as echo.

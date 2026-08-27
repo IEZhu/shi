@@ -169,6 +169,10 @@ fn name_voice(
         guard.name_session_slot(meeting_id, slot, name, &jiff::Zoned::now().to_string())?
     };
 
+    // The meeting may still be running; tell it, or it will keep using the
+    // speaker number for everything said from here on.
+    session.note_named_voice(slot, speaker.id, name);
+
     rerender(&session, meeting_id)?;
     Ok(speaker.id)
 }
