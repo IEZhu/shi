@@ -100,6 +100,8 @@ pub struct Readiness {
     pub recording: bool,
     /// Measured decode cost per second of audio, once transcription has run.
     pub rtf: Option<f32>,
+    /// Utterances dropped because the microphone was hearing the speakers.
+    pub echo_suppressed: u64,
 }
 
 impl Readiness {
@@ -110,6 +112,7 @@ impl Readiness {
             missing_models,
             recording: false,
             rtf: None,
+            echo_suppressed: 0,
         }
     }
 }

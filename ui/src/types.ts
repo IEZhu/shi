@@ -22,6 +22,8 @@ export interface Readiness {
   recording: boolean;
   /** Decode seconds per second of audio, once transcription has run. */
   rtf: number | null;
+  /** Utterances dropped because the microphone was hearing the speakers. */
+  echoSuppressed: number;
 }
 
 /// Mirrors `session::TranscriptEvent`.

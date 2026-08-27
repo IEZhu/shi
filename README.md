@@ -15,10 +15,14 @@ diarization, which removes half the hard problem before a model runs.
 | Milestone | State |
 |---|---|
 | M0 — capture + readiness panel | done |
-| M1 — transcription (sherpa-onnx, VAD, hybrid partial/final) | next |
-| M2 — diarization and voice profiles | |
-| M3 — model manager, echo detection, retention | |
+| M1 — transcription, storage, live transcript, echo suppression | done |
+| M2 — diarization and voice profiles | next |
+| M3 — model manager, retention, hotword glossary | |
 | M4 — Windows and Linux ports | |
+
+Meetings transcribe end to end and are written to Markdown as they happen.
+Speakers are attributed by stream — the microphone is you, the system output is
+everyone else — until diarization arrives in M2 and splits the second one.
 
 ## Requirements
 
@@ -28,6 +32,7 @@ macOS 14.2 or later (the Core Audio process-tap API), Rust 1.92, Node 22+.
 
 ```bash
 npm install
+scripts/fetch-models.sh
 npx tauri build --debug --bundles app
 open target/debug/bundle/macos/Shi.app
 ```
@@ -71,8 +76,11 @@ into a rewrite instead of one new `AudioSource`.
 ```
 crates/audio/        AudioSource trait, ring buffers, mic (cpal), WAV FileSource
 crates/audio/objc/   Core Audio process-tap shim (macOS)
-src-tauri/           app shell, capture orchestration, readiness events
+crates/pipeline/     resampling, VAD, recognition, draft cadence, echo suppression
+crates/store/        SQLite schema and the Markdown projection
+src-tauri/           app shell, session orchestration, commands
 ui/                  React frontend
 scripts/dev-run.sh   bundle + sign + launch, for testing system capture
+scripts/fetch-models.sh  download the recogniser and VAD
 docs/                findings worth keeping
 ```

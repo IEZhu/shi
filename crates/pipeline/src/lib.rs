@@ -7,12 +7,14 @@
 
 pub mod asr;
 pub mod cadence;
+pub mod echo;
 pub mod engine;
 pub mod error;
 pub mod event;
 
 pub use asr::{ASR_SAMPLE_RATE, ModelPaths, SherpaTranscriber, Transcriber, Transcript};
 pub use cadence::Cadence;
+pub use echo::{DEFAULT_ECHO_THRESHOLD, EchoReference};
 pub use engine::{StreamPipeline, VadSettings};
 pub use event::PipelineEvent;
 pub use error::{PipelineError, Result};

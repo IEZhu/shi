@@ -16,7 +16,7 @@ use config::Config;
 use error::AppError;
 use serde::Serialize;
 use session::Session;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, RunEvent, State};
 
 struct AppState {
     session: Mutex<Session>,
@@ -190,6 +190,22 @@ pub fn run() {
             meetings,
             rename_speaker
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|handle, event| {
+            // Quitting mid-meeting must still close it: otherwise the meeting
+            // is left open in the database and its Markdown stops at whichever
+            // periodic render happened last. Dropping managed state on exit is
+            // not guaranteed to run, so do it explicitly.
+            // Which of these macOS delivers depends on how the quit was
+            // requested, so handle both; `stop` is a no-op once stopped.
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                let state: State<'_, AppState> = handle.state();
+                let mut session = lock_session(&state);
+                if session.is_running() {
+                    tracing::info!("closing the meeting before exit");
+                    session.stop();
+                }
+            }
+        });
 }

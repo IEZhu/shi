@@ -8,11 +8,25 @@ use shi_audio::StreamKind;
 
 use crate::asr::{ASR_SAMPLE_RATE, Transcriber};
 use crate::cadence::Cadence;
+use crate::echo::EchoReference;
 use crate::error::{PipelineError, Result};
 use crate::event::PipelineEvent;
 
 /// Seconds of audio the VAD may buffer internally.
 const VAD_BUFFER_SECONDS: f32 = 30.0;
+
+/// What this stream does about acoustic echo.
+///
+/// Without headphones the microphone re-records whatever the speakers play, so
+/// every remote utterance would be transcribed twice. The system stream
+/// publishes what it hears; the microphone checks itself against it.
+#[derive(Default)]
+enum EchoRole {
+    #[default]
+    Ignore,
+    Publish(Arc<EchoReference>),
+    Suppress(Arc<EchoReference>),
+}
 
 /// Tuning for speech detection. `max_speech` is the important one: it forces a
 /// long monologue to close so the transcript keeps flowing and re-decoding an
@@ -61,6 +75,8 @@ pub struct StreamPipeline {
     last_draft: Option<Instant>,
     /// Whether a draft is currently on screen awaiting its final.
     draft_showing: bool,
+    echo: EchoRole,
+    suppressed: u64,
 }
 
 impl StreamPipeline {
@@ -110,12 +126,43 @@ impl StreamPipeline {
             consumed: 0,
             last_draft: None,
             draft_showing: false,
+            echo: EchoRole::default(),
+            suppressed: 0,
         })
     }
 
     /// Measured decode cost per second of audio, for diagnostics.
     pub fn rtf(&self) -> f32 {
         self.cadence.rtf()
+    }
+
+    /// Publish this stream's audio so another can recognise it echoing back.
+    /// Belongs on the system stream.
+    pub fn publish_echo_reference(&mut self, reference: Arc<EchoReference>) {
+        self.echo = EchoRole::Publish(reference);
+    }
+
+    /// Drop utterances that are `reference` arriving through the air. Belongs
+    /// on the microphone stream.
+    pub fn suppress_echo_of(&mut self, reference: Arc<EchoReference>) {
+        self.echo = EchoRole::Suppress(reference);
+    }
+
+    /// Utterances discarded as echo.
+    ///
+    /// Surfaced rather than kept quiet: suppression deletes speech, so if it
+    /// ever misfires the user needs to be able to see that it is happening
+    /// instead of wondering why they are missing from their own transcript.
+    pub fn suppressed_echo(&self) -> u64 {
+        self.suppressed
+    }
+
+    /// Whether this utterance is the speakers coming back in through the mic.
+    fn is_echo(&self, samples: &[f32], start: Duration) -> bool {
+        match &self.echo {
+            EchoRole::Suppress(reference) => reference.is_echo(samples, start),
+            _ => false,
+        }
     }
 
     /// Feed captured audio at the source's native rate and collect whatever
@@ -131,6 +178,10 @@ impl StreamPipeline {
         };
         if resampled.is_empty() {
             return Vec::new();
+        }
+
+        if let EchoRole::Publish(reference) = &self.echo {
+            reference.push(&resampled);
         }
 
         self.vad.accept_waveform(&resampled);
@@ -171,6 +222,26 @@ impl StreamPipeline {
             let start = samples_to_duration(start_sample);
             let end = samples_to_duration(start_sample + length as u64);
 
+            // Check before decoding: an echo costs nothing to discard and a
+            // decode is the most expensive thing this loop does.
+            if self.is_echo(&samples, start) {
+                self.suppressed += 1;
+                tracing::debug!(
+                    stream = %self.stream,
+                    at = ?start,
+                    total = self.suppressed,
+                    "discarded an utterance as speaker echo"
+                );
+                self.discard_through(start_sample + length as u64);
+                if self.draft_showing {
+                    self.draft_showing = false;
+                    events.push(PipelineEvent::DraftAbandoned {
+                        stream: self.stream,
+                    });
+                }
+                continue;
+            }
+
             let began = Instant::now();
             let transcript = match self.transcriber.transcribe(&samples) {
                 Ok(t) => t,
@@ -193,6 +264,14 @@ impl StreamPipeline {
                 }
                 continue;
             }
+
+            tracing::debug!(
+                stream = %self.stream,
+                at = ?start,
+                len = ?end.saturating_sub(start),
+                chars = transcript.text.chars().count(),
+                "finalised an utterance"
+            );
 
             self.draft_showing = false;
             events.push(PipelineEvent::Final {
@@ -235,6 +314,14 @@ impl StreamPipeline {
             return None;
         }
 
+        // Suppress echoed drafts too, or the user watches their own transcript
+        // fill with the other side's words and then empty again.
+        let window_start = samples_to_duration(self.open_start + offset as u64);
+        if self.is_echo(window, window_start) {
+            self.last_draft = Some(Instant::now());
+            return None;
+        }
+
         let began = Instant::now();
         let transcript = self.transcriber.transcribe(window).ok()?;
         let elapsed = began.elapsed();
@@ -249,7 +336,7 @@ impl StreamPipeline {
         self.draft_showing = true;
         Some(PipelineEvent::Draft {
             stream: self.stream,
-            start: samples_to_duration(self.open_start + offset as u64),
+            start: window_start,
             text: transcript.text,
         })
     }

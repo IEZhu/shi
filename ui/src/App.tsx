@@ -135,11 +135,21 @@ export function App() {
         <>
           <div className="transcript-head">
             <h2>Транскрипт</h2>
-            {readiness?.rtf != null && readiness.rtf > 0 && (
-              <span className="rtf" title="во сколько раз быстрее реального времени">
-                ×{(1 / readiness.rtf).toFixed(1)}
-              </span>
-            )}
+            <span className="meta">
+              {(readiness?.echoSuppressed ?? 0) > 0 && (
+                <span
+                  className="echo"
+                  title="реплики, распознанные как звук динамиков в микрофоне, и потому не записанные. Наушники убирают эффект полностью."
+                >
+                  эхо подавлено: {readiness?.echoSuppressed}
+                </span>
+              )}
+              {readiness?.rtf != null && readiness.rtf > 0 && (
+                <span className="rtf" title="во сколько раз быстрее реального времени">
+                  ×{(1 / readiness.rtf).toFixed(1)}
+                </span>
+              )}
+            </span>
           </div>
           <Transcript turns={turns} />
         </>

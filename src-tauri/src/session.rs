@@ -1,12 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Serialize;
 use shi_audio::{StreamHandle, StreamKind};
 use shi_pipeline::{
-    PipelineEvent, SherpaTranscriber, StreamPipeline, Transcriber, VadSettings,
+    EchoReference, PipelineEvent, SherpaTranscriber, StreamPipeline, Transcriber, VadSettings,
 };
 use shi_store::{NewSegment, Store, markdown};
 use tauri::{AppHandle, Emitter};
@@ -24,10 +24,6 @@ const METER_TICK: Duration = Duration::from_millis(50);
 const IDLE_SLEEP: Duration = Duration::from_millis(10);
 /// Samples pulled from a ring per turn, roughly 20 ms at 48 kHz.
 const READ_CHUNK: usize = 1024;
-/// Markdown is re-rendered at most this often while a meeting runs; the
-/// database already holds every finalised utterance, so this is only about
-/// keeping the file fresh for anyone watching it.
-const RENDER_INTERVAL: Duration = Duration::from_secs(10);
 
 /// What the transcript view receives.
 #[derive(Debug, Clone, Serialize)]
@@ -68,8 +64,17 @@ struct SessionState {
     meeting_id: Option<i64>,
 }
 
-/// Shared measurement so the readiness panel can show what decoding costs.
-type SharedRtf = Arc<Mutex<Option<f32>>>;
+/// What the pipelines have learned, for the readiness panel.
+#[derive(Debug, Default, Clone, Copy)]
+struct PipelineStats {
+    /// Decode seconds per second of audio.
+    rtf: Option<f32>,
+    /// Utterances discarded as speaker echo. Shown rather than hidden:
+    /// suppression deletes speech, so a misfire has to be visible.
+    echo_suppressed: u64,
+}
+
+type SharedStats = Arc<Mutex<PipelineStats>>;
 
 impl Session {
     pub fn new(config: Config) -> Result<Self, AppError> {
@@ -142,7 +147,10 @@ impl Session {
         };
 
         self.stop.store(false, Ordering::SeqCst);
-        let rtf: SharedRtf = Arc::new(Mutex::new(None));
+        let pipeline_stats: SharedStats = Arc::new(Mutex::new(PipelineStats::default()));
+        // One reference, shared: the system stream fills it and the microphone
+        // checks itself against it.
+        let echo = Arc::new(EchoReference::default());
 
         let StartedStreams { mic, system } = streams;
         let mut meters = Vec::new();
@@ -158,14 +166,15 @@ impl Session {
                         app.clone(),
                         handle,
                         meeting_id,
-                        Arc::clone(&rtf),
+                        Arc::clone(&pipeline_stats),
+                        Arc::clone(&echo),
                     )?);
                 }
                 Err(status) => meters.push(Err(status)),
             }
         }
 
-        self.workers.push(self.spawn_meter(app, meters, meeting_id.is_some(), rtf));
+        self.workers.push(self.spawn_meter(app, meters, meeting_id.is_some(), pipeline_stats));
         lock(&self.state).meeting_id = meeting_id;
 
         Ok(self.readiness())
@@ -177,7 +186,8 @@ impl Session {
         app: AppHandle,
         mut handle: StreamHandle,
         meeting_id: Option<i64>,
-        rtf: SharedRtf,
+        stats: SharedStats,
+        echo: Arc<EchoReference>,
     ) -> Result<JoinHandle<()>, AppError> {
         let kind = handle.info.kind;
         let stop = Arc::clone(&self.stop);
@@ -192,13 +202,21 @@ impl Session {
                     &config.recognizer(),
                     config.asr_threads,
                 )?);
-                Some(StreamPipeline::new(
+                let mut pipeline = StreamPipeline::new(
                     kind,
                     handle.info.sample_rate,
                     &config.silero().to_string_lossy(),
                     transcriber,
                     VadSettings::default(),
-                )?)
+                )?;
+
+                // The system stream is the reference; the microphone is what
+                // gets contaminated by it.
+                match kind {
+                    StreamKind::System => pipeline.publish_echo_reference(echo),
+                    StreamKind::Mic => pipeline.suppress_echo_of(echo),
+                }
+                Some(pipeline)
             }
             None => None,
         };
@@ -206,7 +224,6 @@ impl Session {
         Ok(thread::spawn(move || {
             let mut pipeline = pipeline;
             let mut buffer = vec![0.0f32; READ_CHUNK];
-            let mut last_render = Instant::now();
 
             while !stop.load(Ordering::SeqCst) {
                 let mut filled = 0;
@@ -232,13 +249,18 @@ impl Session {
                 };
 
                 let events = pipeline.push(&buffer[..filled]);
-                if let Ok(mut slot) = rtf.lock() {
-                    *slot = Some(pipeline.rtf());
+                if let Ok(mut slot) = stats.lock() {
+                    slot.rtf = Some(pipeline.rtf());
+                    // Only the microphone suppresses, so this never races.
+                    if kind == StreamKind::Mic {
+                        slot.echo_suppressed = pipeline.suppressed_echo();
+                    }
                 }
-                emit_events(&app, &store, &config, meeting_id, events);
-
-                if last_render.elapsed() >= RENDER_INTERVAL {
-                    last_render = Instant::now();
+                // Re-render on every utterance rather than on a timer. A
+                // rendered meeting is a few tens of kilobytes, and the
+                // alternative is a file that trails the transcript by however
+                // long the timer happens to be when the process dies.
+                if emit_events(&app, &store, &config, meeting_id, events) {
                     if let Some(id) = meeting_id {
                         render_markdown(&store, &config, id);
                     }
@@ -248,7 +270,11 @@ impl Session {
             // Closing time: whatever speech is still buffered is still speech.
             if let Some(pipeline) = pipeline.as_mut() {
                 let events = pipeline.flush();
-                emit_events(&app, &store, &config, meeting_id, events);
+                if emit_events(&app, &store, &config, meeting_id, events) {
+                    if let Some(id) = meeting_id {
+                        render_markdown(&store, &config, id);
+                    }
+                }
             }
         }))
     }
@@ -259,7 +285,7 @@ impl Session {
         app: AppHandle,
         meters: Vec<Result<(shi_audio::SourceInfo, Arc<shi_audio::StreamStats>), StreamStatus>>,
         recording: bool,
-        rtf: SharedRtf,
+        stats: SharedStats,
     ) -> JoinHandle<()> {
         let stop = Arc::clone(&self.stop);
         let state = Arc::clone(&self.state);
@@ -279,12 +305,14 @@ impl Session {
                     .next()
                     .unwrap_or(StreamStatus::stopped(StreamKind::System));
 
+                let sampled = stats.lock().map(|s| *s).unwrap_or_default();
                 let readiness = Readiness {
                     mic,
                     system,
                     missing_models: missing.clone(),
                     recording,
-                    rtf: rtf.lock().ok().and_then(|r| *r),
+                    rtf: sampled.rtf,
+                    echo_suppressed: sampled.echo_suppressed,
                 };
 
                 // Once a second, leave something diagnosable behind. Capture
@@ -298,6 +326,7 @@ impl Session {
                         system = ?readiness.system.verdict,
                         system_dropped = readiness.system.frames_dropped,
                         rtf = ?readiness.rtf,
+                        echo_suppressed = readiness.echo_suppressed,
                         "readiness"
                     );
                 }
@@ -366,13 +395,18 @@ impl Drop for Session {
 }
 
 /// Persist finals, then tell the UI about everything.
+///
+/// Returns whether anything was written, so the caller knows the Markdown is
+/// now stale.
 fn emit_events(
     app: &AppHandle,
     store: &Arc<Mutex<Store>>,
     config: &Config,
     meeting_id: Option<i64>,
     events: Vec<PipelineEvent>,
-) {
+) -> bool {
+    let mut stored = false;
+
     for event in events {
         let payload = match event {
             PipelineEvent::Draft {
@@ -419,6 +453,7 @@ fn emit_events(
                         continue;
                     }
                 };
+                stored = true;
 
                 TranscriptEvent::Final {
                     id,
@@ -432,9 +467,11 @@ fn emit_events(
         };
 
         if app.emit(TRANSCRIPT_EVENT, &payload).is_err() {
-            return;
+            return stored;
         }
     }
+
+    stored
 }
 
 /// Re-render the whole file from the database. Never appended to, so a speaker
