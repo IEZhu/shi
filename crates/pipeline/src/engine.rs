@@ -16,6 +16,19 @@ use crate::event::PipelineEvent;
 /// Seconds of audio the VAD may buffer internally.
 const VAD_BUFFER_SECONDS: f32 = 30.0;
 
+/// How far the sample clock may fall behind the wall clock before silence is
+/// inserted to catch it up.
+///
+/// A source that stops delivering while nothing is happening — as the macOS
+/// system tap does when no application is playing — would otherwise leave the
+/// pipeline's idea of "now" short by the whole idle period. Every timestamp
+/// after that is early, and the two streams stop lining up with each other.
+const MAX_CLOCK_DRIFT: Duration = Duration::from_millis(400);
+
+/// Cap on silence inserted in one go, so a long idle stretch is caught up over
+/// several pushes instead of one enormous allocation.
+const MAX_CATCH_UP: Duration = Duration::from_secs(5);
+
 /// Somewhere to keep the resampled audio, so the meeting can be re-processed
 /// later with a better model.
 ///
@@ -87,6 +100,8 @@ pub struct StreamPipeline {
     /// Total 16 kHz samples handed to the VAD, and the clock for timestamps.
     consumed: u64,
     last_draft: Option<Instant>,
+    /// When capture began, against which the sample clock is reconciled.
+    started: Instant,
     /// Whether a draft is currently on screen awaiting its final.
     draft_showing: bool,
     echo: EchoRole,
@@ -142,6 +157,7 @@ impl StreamPipeline {
             open_start: 0,
             consumed: 0,
             last_draft: None,
+            started: Instant::now(),
             draft_showing: false,
             echo: EchoRole::default(),
             suppressed: 0,
@@ -218,6 +234,14 @@ impl StreamPipeline {
     /// Feed captured audio at the source's native rate and collect whatever
     /// the pipeline can say about it now.
     pub fn push(&mut self, native: &[f32]) -> Vec<PipelineEvent> {
+        self.push_at(native, self.started.elapsed())
+    }
+
+    /// Feed audio, stating how long capture has been running.
+    ///
+    /// Taking the clock as an argument keeps the silence-catch-up testable
+    /// without sleeping through the gap it is meant to handle.
+    pub fn push_at(&mut self, native: &[f32], elapsed: Duration) -> Vec<PipelineEvent> {
         if native.is_empty() {
             return Vec::new();
         }
@@ -229,6 +253,10 @@ impl StreamPipeline {
         if resampled.is_empty() {
             return Vec::new();
         }
+
+        // Catch the sample clock up before the new audio, so an utterance that
+        // follows a silent gap is stamped where it actually happened.
+        self.reconcile_clock(elapsed);
 
         if let Some(recorder) = self.recorder.as_mut() {
             recorder.write(&resampled);
@@ -265,6 +293,46 @@ impl StreamPipeline {
             });
         }
         events
+    }
+
+    /// Insert silence for audio a source never delivered.
+    ///
+    /// Only ever adds: a source running ahead of the wall clock — a file replayed
+    /// as fast as it can be read, as the tests do — is left alone.
+    fn reconcile_clock(&mut self, elapsed: Duration) {
+        let heard = samples_to_duration(self.consumed);
+        let Some(behind) = elapsed.checked_sub(heard) else {
+            return;
+        };
+        if behind < MAX_CLOCK_DRIFT {
+            return;
+        }
+
+        let catch_up = behind.min(MAX_CATCH_UP);
+        let samples = duration_to_samples(catch_up);
+        if samples == 0 {
+            return;
+        }
+
+        tracing::debug!(
+            stream = %self.stream,
+            behind_ms = behind.as_millis(),
+            "source went quiet; inserting silence to keep the clock honest"
+        );
+
+        let silence = vec![0.0f32; samples];
+        self.vad.accept_waveform(&silence);
+        self.consumed += samples as u64;
+
+        if let Some(recorder) = self.recorder.as_mut() {
+            // The recording has to match the timeline the transcript refers to,
+            // or re-processing would slice the wrong parts of it.
+            recorder.write(&silence);
+        }
+
+        // Nothing was being said, so nothing is left open.
+        self.open.clear();
+        self.open_start = self.consumed;
     }
 
     /// Drain every utterance the VAD has closed.

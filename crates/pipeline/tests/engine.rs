@@ -224,3 +224,108 @@ fn real_model_transcribes_the_fixture() {
         );
     }
 }
+
+#[test]
+fn a_source_that_goes_quiet_does_not_rewind_the_clock() {
+    // The macOS system tap delivers nothing while no application is playing.
+    // Counting only the samples that arrive would leave every later timestamp
+    // early by the whole idle period, and would pull the two streams out of
+    // step with each other.
+    let Some(silero) = silero() else {
+        eprintln!("skipping: models/silero_vad.onnx absent — run scripts/fetch-models.sh");
+        return;
+    };
+
+    let mut pipeline = StreamPipeline::new(
+        StreamKind::System,
+        16_000,
+        &silero,
+        Arc::new(StubTranscriber::new()),
+        VadSettings::default(),
+    )
+    .expect("build pipeline");
+
+    let audio = fixture();
+    let speech = Duration::from_secs_f64(audio.len() as f64 / 16_000.0);
+    let gap = Duration::from_secs(30);
+    let mut events = Vec::new();
+
+    // First turn, arriving in real time.
+    let mut clock = Duration::ZERO;
+    for block in audio.chunks(320) {
+        clock += Duration::from_secs_f64(block.len() as f64 / 16_000.0);
+        events.extend(pipeline.push_at(block, clock));
+    }
+
+    // Half a minute in which the source delivers nothing at all.
+    clock += gap;
+
+    for block in audio.chunks(320) {
+        clock += Duration::from_secs_f64(block.len() as f64 / 16_000.0);
+        events.extend(pipeline.push_at(block, clock));
+    }
+    events.extend(pipeline.flush());
+
+    let starts: Vec<Duration> = events
+        .iter()
+        .filter_map(|event| match event {
+            PipelineEvent::Final { start, .. } => Some(*start),
+            _ => None,
+        })
+        .collect();
+    assert!(starts.len() >= 3, "expected turns either side of the gap: {starts:?}");
+
+    let before = starts.iter().filter(|s| **s < speech).count();
+    let after = starts.iter().filter(|s| **s >= speech + gap / 2).count();
+
+    assert!(before > 0, "nothing was recorded before the gap: {starts:?}");
+    assert!(
+        after > 0,
+        "everything after a 30 s silence was stamped as if it followed \
+         immediately: {starts:?}"
+    );
+
+    let last = starts.iter().max().expect("a final");
+    assert!(
+        *last >= gap,
+        "the idle period never entered the timeline: last turn at {last:?}"
+    );
+}
+
+#[test]
+fn a_faster_than_realtime_replay_is_not_padded() {
+    // Fixtures are fed as fast as they can be read, which runs ahead of the
+    // wall clock. Reconciliation must only ever add time, never invent audio
+    // for a source that is simply quick.
+    let Some(silero) = silero() else {
+        eprintln!("skipping: models/silero_vad.onnx absent");
+        return;
+    };
+
+    let mut pipeline = StreamPipeline::new(
+        StreamKind::System,
+        16_000,
+        &silero,
+        Arc::new(StubTranscriber::new()),
+        VadSettings::default(),
+    )
+    .expect("build pipeline");
+
+    let audio = fixture();
+    let events = run(&mut pipeline, &audio);
+
+    let last = events
+        .iter()
+        .filter_map(|event| match event {
+            PipelineEvent::Final { end, .. } => Some(*end),
+            _ => None,
+        })
+        .max()
+        .expect("a final");
+
+    let duration = Duration::from_secs_f64(audio.len() as f64 / 16_000.0);
+    assert!(
+        last <= duration + Duration::from_millis(100),
+        "timeline ran past the audio: {last:?} for {duration:?} of sound"
+    );
+}

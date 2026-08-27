@@ -79,3 +79,30 @@ It also shows the echo problem in miniature: without headphones the microphone
 *does* pick up the remote side, so the same utterance can be transcribed twice.
 `cpal`'s `DeviceDescription::interface_type()` reports `InterfaceType::BuiltIn`
 vs `Bluetooth`/`Usb`, which is the cheap first half of the echo warning.
+
+## The tap goes quiet, and the clock has to know
+
+The system tap delivers nothing while no application is playing. Counting only
+the samples that arrive therefore makes the pipeline's idea of "now" short by
+the whole idle period.
+
+Measured on a meeting left silent for fifteen seconds before anyone spoke:
+
+| | sample clock only | reconciled against the wall clock |
+|---|---:|---:|
+| first utterance stamped at | 422 ms | 9 510 ms |
+| microphone audio recorded | 37.5 s | 37.1 s |
+| system audio recorded | 28.0 s | 35.0 s |
+
+Two consequences, both real:
+
+- every remote line was stamped early by however long the room had been quiet,
+  so wall-clock timestamps drifted further from the calendar as a meeting went on
+- the two streams ran on different timelines, so microphone and system
+  utterances interleaved in the wrong order in the transcript
+
+`StreamPipeline` now compares elapsed time against the audio it has actually
+heard and inserts silence when it falls behind, feeding it to the voice-activity
+detector and the recording alike so the transcript and the audio agree about
+when things happened. It only ever adds: a fixture replayed faster than real
+time is left alone, which is what keeps the tests deterministic.
