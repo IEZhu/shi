@@ -317,3 +317,30 @@ button.ghost { background: transparent; border-color: var(--line); color: var(--
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
+
+/* --- model manager ------------------------------------------------------ */
+
+.models { overflow-y: auto; }
+.model-group + .model-group { margin-top: 20px; }
+.model-group h3 {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+.models .meter { margin: 4px 0 6px; }
+.models .excerpt { font-style: normal; margin-bottom: 8px; }
+.models .toast-row { flex-wrap: wrap; }
+
+button.inline {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}

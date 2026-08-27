@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Download the models the pipeline needs into ./models.
 #
+# The app has a model manager that does this from the UI; this script exists so
+# that tests and a fresh checkout can be set up without launching anything.
+#
 # Kept out of git: the recogniser alone is 643 MB. Tests that need it skip
 # themselves when it is absent rather than failing.
 set -euo pipefail

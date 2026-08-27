@@ -120,3 +120,43 @@ export function formatDuration(ms: number): string {
   if (seconds < 60) return `${seconds} с`;
   return `${Math.floor(seconds / 60)} мин ${String(seconds % 60).padStart(2, "0")} с`;
 }
+
+/** Mirrors `models::CatalogueEntry`. */
+export interface CatalogueEntry {
+  id: string;
+  kind: "recognizer" | "vad" | "speakerEmbedding";
+  displayName: string;
+  summary: string;
+  languages: string;
+  downloadBytes: number;
+  installed: boolean;
+  installing: boolean;
+  selected: boolean;
+  /** Whether the checksum is published by the release or was recorded here. */
+  checksumPublished: boolean;
+}
+
+/** Mirrors `models::InstallProgress`. */
+export type InstallProgress =
+  | { state: "downloading"; id: string; downloaded: number; total: number }
+  | { state: "installed"; id: string }
+  | { state: "cancelled"; id: string }
+  | { state: "failed"; id: string; message: string };
+
+export interface Settings {
+  recognizerId: string;
+  showDrafts: boolean;
+  suppressEcho: boolean;
+}
+
+export const KIND_LABEL: Record<CatalogueEntry["kind"], string> = {
+  recognizer: "Распознавание речи",
+  vad: "Границы реплик",
+  speakerEmbedding: "Различение голосов",
+};
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} КБ`;
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} ГБ` : `${Math.round(mb)} МБ`;
+}

@@ -7,19 +7,24 @@
 mod capture;
 mod config;
 mod error;
+mod models;
 mod session;
+mod settings;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use capture::Readiness;
 use config::Config;
 use error::AppError;
 use serde::Serialize;
+use models::{CatalogueEntry, Downloads};
 use session::Session;
+use settings::Settings;
 use tauri::{AppHandle, Manager, RunEvent, State};
 
 struct AppState {
     session: Mutex<Session>,
+    downloads: Arc<Downloads>,
 }
 
 /// A worker panic must not wedge the UI, so recover the guard rather than
@@ -255,6 +260,62 @@ fn rerender(session: &Session, meeting_id: i64) -> Result<(), AppError> {
     Ok(())
 }
 
+// ---- models ------------------------------------------------------------
+
+#[tauri::command]
+fn model_catalogue(state: State<'_, AppState>) -> Vec<CatalogueEntry> {
+    let session = lock_session(&state);
+    let config = session.config();
+    models::catalogue(
+        &config.models_dir,
+        &state.downloads,
+        &config.settings.recognizer_id,
+    )
+}
+
+/// Start fetching a model. Returns at once; progress arrives as events.
+#[tauri::command]
+fn install_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), AppError> {
+    let spec = shi_models::by_id(&id).ok_or_else(|| AppError::UnknownModel(id.clone()))?;
+    let models_dir = lock_session(&state).config().models_dir.clone();
+    models::install_in_background(app, spec, models_dir, Arc::clone(&state.downloads));
+    Ok(())
+}
+
+/// Stop a running download. The partial file stays, so retrying resumes.
+#[tauri::command]
+fn cancel_model_install(state: State<'_, AppState>, id: String) {
+    state.downloads.cancel(&id);
+}
+
+#[tauri::command]
+fn uninstall_model(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
+    let spec = shi_models::by_id(&id).ok_or_else(|| AppError::UnknownModel(id.clone()))?;
+    let models_dir = lock_session(&state).config().models_dir.clone();
+    shi_models::uninstall(spec, &models_dir)?;
+    tracing::info!(model = %id, "model removed");
+    Ok(())
+}
+
+// ---- settings ----------------------------------------------------------
+
+#[tauri::command]
+fn settings(state: State<'_, AppState>) -> Settings {
+    lock_session(&state).config().settings.clone()
+}
+
+/// Apply and persist a settings change.
+#[tauri::command]
+fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings, AppError> {
+    let mut session = lock_session(&state);
+    session.apply_settings(settings)?;
+    Ok(session.config().settings.clone())
+}
+
 fn default_meeting_title() -> String {
     jiff::Zoned::now().strftime("Встреча %d.%m %H:%M").to_string()
 }
@@ -293,6 +354,7 @@ pub fn run() {
             let session = Session::new(config)?;
             app.manage(AppState {
                 session: Mutex::new(session),
+                downloads: Arc::new(Downloads::default()),
             });
 
             // A bundled app has no terminal to drive, so these let a test
@@ -321,6 +383,12 @@ pub fn run() {
             start_meeting,
             stop,
             meetings,
+            model_catalogue,
+            install_model,
+            cancel_model_install,
+            uninstall_model,
+            settings,
+            save_settings,
             unnamed_voices,
             name_voice,
             forget_speaker,
@@ -338,6 +406,10 @@ pub fn run() {
             // requested, so handle both; `stop` is a no-op once stopped.
             if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
                 let state: State<'_, AppState> = handle.state();
+                // Downloads keep their partial files, so quitting mid-fetch
+                // costs nothing but the time already spent.
+                state.downloads.cancel_all();
+
                 let mut session = lock_session(&state);
                 if session.is_running() {
                     tracing::info!("closing the meeting before exit");

@@ -17,7 +17,7 @@ diarization, which removes half the hard problem before a model runs.
 | M0 — capture + readiness panel | done |
 | M1 — transcription, storage, live transcript, echo suppression | done |
 | M2 — diarization and persistent voice profiles | done |
-| M3 — model manager, retention, hotword glossary | next |
+| M3 — model manager done; archive, glossary and retention next | in progress |
 | M4 — Windows and Linux ports | |
 
 Meetings transcribe end to end and are written to Markdown as they happen.
@@ -32,10 +32,13 @@ macOS 14.2 or later (the Core Audio process-tap API), Rust 1.92, Node 22+.
 
 ```bash
 npm install
-scripts/fetch-models.sh
 npx tauri build --debug --bundles app
 open target/debug/bundle/macos/Shi.app
 ```
+
+The app downloads its own models on first run — Parakeet for speed on Russian
+and English, or Whisper for language coverage. `scripts/fetch-models.sh` does
+the same from a shell, which is what the tests use.
 
 ### Why not `tauri dev`
 
@@ -79,6 +82,7 @@ crates/audio/objc/   Core Audio process-tap shim (macOS)
 crates/pipeline/     resampling, VAD, recognition, draft cadence, echo suppression,
                      speaker tracking
 crates/store/        SQLite schema and the Markdown projection
+crates/models/       catalogue, verified downloads, install and removal
 src-tauri/           app shell, session orchestration, commands
 ui/                  React frontend
 scripts/dev-run.sh   bundle + sign + launch, for testing system capture

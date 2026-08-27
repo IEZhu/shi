@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 shi-pipeline = { version = "0.1.0", path = "../crates/pipeline" }
 shi-store = { version = "0.1.0", path = "../crates/store" }
 jiff = "0.2.35"
+shi-models = { version = "0.1.0", path = "../crates/models" }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

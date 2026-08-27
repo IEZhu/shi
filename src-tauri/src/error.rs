@@ -16,6 +16,15 @@ pub enum AppError {
     #[error("a speaker needs a name")]
     EmptyName,
 
+    #[error("unknown model: {0}")]
+    UnknownModel(String),
+
+    #[error(transparent)]
+    Models(#[from] shi_models::ModelError),
+
+    #[error("cannot change settings while a meeting is running")]
+    BusyRecording,
+
     #[error("cannot create application directories: {0}")]
     Io(#[from] std::io::Error),
 }

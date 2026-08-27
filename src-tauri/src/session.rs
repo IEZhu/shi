@@ -404,6 +404,20 @@ impl Session {
         &self.config
     }
 
+    /// Apply and persist a settings change.
+    ///
+    /// Refused mid-meeting: swapping the recogniser under a running pipeline
+    /// would leave one half of a transcript produced by a different model.
+    pub fn apply_settings(&mut self, settings: crate::settings::Settings) -> Result<(), AppError> {
+        if self.is_running() {
+            return Err(AppError::BusyRecording);
+        }
+        settings.save(&self.config.data_dir)?;
+        self.config.settings = settings;
+        self.set_readiness(Readiness::idle(self.config.missing_models()));
+        Ok(())
+    }
+
     fn compose_idle_readiness(&self, streams: &StartedStreams) -> Readiness {
         let mut readiness = Readiness::idle(self.config.missing_models());
         if let Err(status) = &streams.mic {

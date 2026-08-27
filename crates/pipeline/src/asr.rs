@@ -1,47 +1,90 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig};
+use sherpa_onnx::{
+    OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig,
+    OfflineWhisperModelConfig,
+};
 
 use crate::error::{PipelineError, Result};
 
 /// Audio must reach the recogniser at this rate; see `shi_audio::TARGET_SAMPLE_RATE`.
 pub const ASR_SAMPLE_RATE: i32 = 16_000;
 
-/// Files making up a transducer ASR model on disk.
+/// Where a recogniser's files are, and which sherpa configuration they need.
+///
+/// An enum rather than a bag of optional paths: the two families need
+/// genuinely different configuration, and a struct with four `Option`s would
+/// let a caller build a combination that cannot work.
 #[derive(Debug, Clone)]
-pub struct ModelPaths {
-    pub encoder: PathBuf,
-    pub decoder: PathBuf,
-    pub joiner: PathBuf,
-    pub tokens: PathBuf,
-    /// sherpa's identifier for the architecture, e.g. `nemo_transducer`.
-    pub model_type: String,
+pub enum ModelPaths {
+    /// NeMo transducer — encoder, decoder and joiner, as Parakeet ships.
+    NemoTransducer {
+        encoder: PathBuf,
+        decoder: PathBuf,
+        joiner: PathBuf,
+        tokens: PathBuf,
+    },
+    /// Whisper — encoder and decoder only.
+    Whisper {
+        encoder: PathBuf,
+        decoder: PathBuf,
+        tokens: PathBuf,
+        /// Fixed language, or `None` to let Whisper detect one per utterance.
+        language: Option<String>,
+    },
 }
 
 impl ModelPaths {
-    /// Locate a model laid out the way sherpa-onnx ships it: one directory
-    /// holding `encoder`/`decoder`/`joiner` int8 ONNX files plus `tokens.txt`.
+    /// A directory laid out the way sherpa-onnx ships Parakeet.
     pub fn parakeet_int8(dir: impl AsRef<Path>) -> Self {
         let dir = dir.as_ref();
-        Self {
+        Self::NemoTransducer {
             encoder: dir.join("encoder.int8.onnx"),
             decoder: dir.join("decoder.int8.onnx"),
             joiner: dir.join("joiner.int8.onnx"),
             tokens: dir.join("tokens.txt"),
-            model_type: "nemo_transducer".into(),
         }
     }
 
-    /// Fail before handing paths to the C library, which reports a missing file
-    /// as a null recogniser with no indication of which one was missing.
+    /// A directory laid out the way sherpa-onnx ships Whisper, whose files
+    /// carry the size as a prefix: `turbo-encoder.int8.onnx` and so on.
+    pub fn whisper_int8(dir: impl AsRef<Path>, prefix: &str) -> Self {
+        let dir = dir.as_ref();
+        Self::Whisper {
+            encoder: dir.join(format!("{prefix}-encoder.int8.onnx")),
+            decoder: dir.join(format!("{prefix}-decoder.int8.onnx")),
+            tokens: dir.join(format!("{prefix}-tokens.txt")),
+            language: None,
+        }
+    }
+
+    fn files(&self) -> Vec<(&'static str, &PathBuf)> {
+        match self {
+            ModelPaths::NemoTransducer {
+                encoder,
+                decoder,
+                joiner,
+                tokens,
+            } => vec![
+                ("encoder", encoder),
+                ("decoder", decoder),
+                ("joiner", joiner),
+                ("tokens", tokens),
+            ],
+            ModelPaths::Whisper {
+                encoder,
+                decoder,
+                tokens,
+                ..
+            } => vec![("encoder", encoder), ("decoder", decoder), ("tokens", tokens)],
+        }
+    }
+
+    /// Fail before handing paths to the C library, which reports a missing
+    /// file as a null recogniser without saying which one was missing.
     pub fn verify(&self) -> Result<()> {
-        for (label, path) in [
-            ("encoder", &self.encoder),
-            ("decoder", &self.decoder),
-            ("joiner", &self.joiner),
-            ("tokens", &self.tokens),
-        ] {
+        for (label, path) in self.files() {
             if !path.is_file() {
                 return Err(PipelineError::ModelFileMissing {
                     label,
@@ -50,6 +93,11 @@ impl ModelPaths {
             }
         }
         Ok(())
+    }
+
+    /// The directory the model lives in, used as its recorded identity.
+    fn directory(&self) -> Option<&Path> {
+        self.files().first().and_then(|(_, path)| path.parent())
     }
 }
 
@@ -90,24 +138,52 @@ impl SherpaTranscriber {
         paths.verify()?;
 
         let mut config = OfflineRecognizerConfig::default();
-        config.model_config.transducer = OfflineTransducerModelConfig {
-            encoder: Some(paths.encoder.to_string_lossy().into_owned()),
-            decoder: Some(paths.decoder.to_string_lossy().into_owned()),
-            joiner: Some(paths.joiner.to_string_lossy().into_owned()),
-        };
-        config.model_config.tokens = Some(paths.tokens.to_string_lossy().into_owned());
-        config.model_config.model_type = Some(paths.model_type.clone());
         config.model_config.num_threads = threads.max(1);
+
+        match paths {
+            ModelPaths::NemoTransducer {
+                encoder,
+                decoder,
+                joiner,
+                tokens,
+            } => {
+                config.model_config.transducer = OfflineTransducerModelConfig {
+                    encoder: Some(encoder.to_string_lossy().into_owned()),
+                    decoder: Some(decoder.to_string_lossy().into_owned()),
+                    joiner: Some(joiner.to_string_lossy().into_owned()),
+                };
+                config.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
+                config.model_config.model_type = Some("nemo_transducer".into());
+            }
+            ModelPaths::Whisper {
+                encoder,
+                decoder,
+                tokens,
+                language,
+            } => {
+                config.model_config.whisper = OfflineWhisperModelConfig {
+                    encoder: Some(encoder.to_string_lossy().into_owned()),
+                    decoder: Some(decoder.to_string_lossy().into_owned()),
+                    language: language.clone(),
+                    task: Some("transcribe".into()),
+                    // Timestamps are what let the transcript line up with the
+                    // audio, so ask for them rather than accepting text alone.
+                    enable_token_timestamps: true,
+                    ..OfflineWhisperModelConfig::default()
+                };
+                config.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
+                config.model_config.model_type = Some("whisper".into());
+            }
+        }
 
         let recognizer =
             OfflineRecognizer::create(&config).ok_or(PipelineError::RecognizerCreateFailed)?;
 
         let model_id = paths
-            .encoder
-            .parent()
+            .directory()
             .and_then(|d| d.file_name())
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| paths.model_type.clone());
+            .unwrap_or_else(|| "recognizer".into());
 
         Ok(Self {
             recognizer,

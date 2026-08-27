@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { StreamCard, Transcript } from "./components";
+import { ModelManager } from "./models";
 import { ReviewScreen, SpeakerToast } from "./speakers";
 import { useTranscript } from "./useTranscript";
 import type { Readiness, StreamStatus } from "./types";
@@ -27,6 +28,7 @@ export function App() {
   const [failure, setFailure] = useState<string | null>(null);
   const { turns, discovered, reset, nameSlot, dismissSlot } = useTranscript();
   const [reviewing, setReviewing] = useState<number | null>(null);
+  const [managingModels, setManagingModels] = useState(false);
   const unlisten = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -127,6 +129,9 @@ export function App() {
             </button>
           ) : (
             <>
+              <button className="ghost" onClick={() => setManagingModels(true)}>
+                Модели
+              </button>
               <button className="ghost" onClick={() => act("start_check")} disabled={busy}>
                 Проверить
               </button>
@@ -143,10 +148,12 @@ export function App() {
         </div>
       </header>
 
-      {modelsMissing && (
+      {modelsMissing && !managingModels && (
         <p className="notice">
-          Не хватает моделей: {readiness?.missingModels.join(", ")}. Запустите{" "}
-          <code>scripts/fetch-models.sh</code>.
+          Не хватает моделей: {readiness?.missingModels.join(", ")}.{" "}
+          <button className="inline" onClick={() => setManagingModels(true)}>
+            Скачать
+          </button>
         </p>
       )}
       {failure && <p className="notice error">{failure}</p>}
@@ -165,6 +172,16 @@ export function App() {
           compact={recording}
         />
       </div>
+
+      {managingModels && (
+        <ModelManager
+          onClose={() => {
+            setManagingModels(false);
+            // Downloading a model changes what the readiness panel can say.
+            invoke<Readiness>("readiness").then(setReadiness).catch(() => {});
+          }}
+        />
+      )}
 
       {reviewing !== null && (
         <ReviewScreen

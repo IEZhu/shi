@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use shi_models::{Family, ModelKind, ModelSpec};
 use shi_pipeline::ModelPaths;
 use shi_store::{MarkdownOptions, Meeting};
+
+use crate::settings::Settings;
 
 /// Where the app keeps its data, and where it looks for models.
 ///
@@ -18,6 +21,8 @@ pub struct Config {
     /// Threads per ASR instance. Two pipelines run at once, so this is not
     /// the whole machine.
     pub asr_threads: i32,
+    /// The user's choices, reloaded whenever they change.
+    pub settings: Settings,
 }
 
 impl Config {
@@ -38,12 +43,26 @@ impl Config {
                 .unwrap_or_else(|| PathBuf::from("meetings"))
         });
 
+        let settings = Settings::load(&data_dir);
         Self {
             data_dir,
             models_dir,
             markdown_dir,
             asr_threads: default_asr_threads(),
+            settings,
         }
+    }
+
+    /// The recogniser the user picked, or the default if that is unavailable.
+    pub fn recognizer_spec(&self) -> &'static ModelSpec {
+        shi_models::by_id(&self.settings.recognizer_id)
+            .filter(|spec| spec.kind == ModelKind::Recognizer)
+            .or_else(|| {
+                shi_models::CATALOGUE
+                    .iter()
+                    .find(|spec| spec.kind == ModelKind::Recognizer && spec.default)
+            })
+            .expect("the catalogue always contains a default recogniser")
     }
 
     pub fn database(&self) -> PathBuf {
@@ -51,23 +70,36 @@ impl Config {
     }
 
     pub fn silero(&self) -> PathBuf {
-        self.models_dir.join("silero_vad.onnx")
+        self.model_path("silero-vad")
     }
 
     /// The recogniser directory, laid out the way sherpa-onnx ships it.
     pub fn recognizer_dir(&self) -> PathBuf {
-        self.models_dir
-            .join("sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8")
+        self.recognizer_spec().path_in(&self.models_dir)
     }
 
+    /// Paths in the shape the chosen model's family needs.
     pub fn recognizer(&self) -> ModelPaths {
-        ModelPaths::parakeet_int8(self.recognizer_dir())
+        let spec = self.recognizer_spec();
+        let dir = spec.path_in(&self.models_dir);
+        match spec.family {
+            Family::Whisper => {
+                ModelPaths::whisper_int8(dir, spec.file_prefix.unwrap_or_default())
+            }
+            _ => ModelPaths::parakeet_int8(dir),
+        }
     }
 
     /// The speaker-embedding model. NeMo TitaNet small was measured to be the
     /// clear winner over the CAM++ variants — see docs/speaker-identification.md.
     pub fn speaker_model(&self) -> PathBuf {
-        self.models_dir.join("nemo_en_titanet_small.onnx")
+        self.model_path("titanet-small")
+    }
+
+    fn model_path(&self, id: &str) -> PathBuf {
+        shi_models::by_id(id)
+            .map(|spec| spec.path_in(&self.models_dir))
+            .unwrap_or_else(|| self.models_dir.join(id))
     }
 
     /// Identifies which model produced a stored embedding. Embeddings from
@@ -85,22 +117,11 @@ impl Config {
     /// discovering a missing model at the start of a call is the same failure
     /// as discovering a missing permission.
     pub fn missing_models(&self) -> Vec<String> {
-        let mut missing = Vec::new();
-        if !self.silero().is_file() {
-            missing.push("silero_vad.onnx".into());
-        }
-        if !self.speaker_model().is_file() {
-            missing.push("nemo_en_titanet_small.onnx".into());
-        }
-        if self.recognizer().verify().is_err() {
-            missing.push(
-                self.recognizer_dir()
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "recognizer".into()),
-            );
-        }
-        missing
+        shi_models::required(Some(&self.settings.recognizer_id))
+            .into_iter()
+            .filter(|spec| !spec.installed(&self.models_dir))
+            .map(|spec| spec.display_name.to_string())
+            .collect()
     }
 
     /// How meeting Markdown is rendered.
