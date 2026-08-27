@@ -46,14 +46,43 @@ treat this as a smoke test rather than a WER measurement:
 > decoded: «Кто возьмет задачу по интеграции с платежным шлезом, нужно успеть до пятницы.»
 
 Punctuation, capitalisation and per-token timestamps all arrive for free. The
-one substantive error, `шлюзом` → `шлезом`, is domain vocabulary — precisely
-what sherpa-onnx's hotword biasing (`hotwords_file`, `hotwords_score`,
-`create_stream_with_hotwords`) exists for. A per-meeting glossary of names and
-product terms is the natural fix, and is worth doing before chasing a better
-model.
+one substantive error, `шлюзом` → `шлезом`, is domain vocabulary.
 
-`ё` is normalised to `е` throughout, which is standard for ASR output and not
-worth correcting.
+### Hotword biasing does not fix it — measured
+
+An earlier version of this document proposed a per-meeting glossary, on the
+reasoning that domain vocabulary is exactly what sherpa-onnx's hotword biasing
+(`hotwords_file`, `hotwords_score`) exists for. That was a hypothesis, and
+`examples/hotwords` falsified it. Biasing towards `шлюзом` on the very clip that
+gets it wrong:
+
+| score | output |
+|------:|---|
+| none  | …с платежным **шлезом**, нужно успеть до пятницы. |
+| 1.5   | unchanged |
+| 3     | unchanged |
+| 6     | unchanged |
+| 12    | Кто во**шлюзомшлюзомшлюзом** до пятницы. |
+| 30    | Кшлюзомшлюзомшлюзомшлюзомшлюзомшлюзом… |
+
+There is no useful window: the feature goes from no effect straight to
+destroying the transcript. A glossary was therefore not built. A settings panel
+that does nothing, and wrecks the output if turned up, is worse than its
+absence.
+
+Two facts fell out of the same experiment and are worth keeping:
+
+- sherpa refuses `hotwords_file` unless `decoding_method` is
+  `modified_beam_search`; with the default greedy decoding the recogniser
+  simply fails to build.
+- **`ё` does not exist in this model's vocabulary at all** — zero occurrences in
+  `tokens.txt`, and hotwords containing it are silently skipped with
+  "Cannot find ID for token ё". The `ё` → `е` in every transcript is not
+  normalisation applied afterwards; the model cannot emit the letter. Nothing
+  downstream can recover it, so do not spend effort trying.
+
+Fixing domain vocabulary, if it matters later, means a different model or a
+post-processing pass over the finished transcript — not biasing.
 
 ## Drafts need no voice-activity gate of their own
 
