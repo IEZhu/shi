@@ -480,3 +480,77 @@ fn forgetting_a_voice_reverts_its_lines_rather_than_losing_them() {
         "attribution was lost entirely instead of reverting to the slot"
     );
 }
+
+#[test]
+fn reassigning_voices_keeps_the_names_the_user_gave() {
+    // Re-running attribution from the recording regroups guesses, but a name
+    // the user typed is a fact they supplied, not a guess to recompute.
+    let mut store = Store::in_memory().expect("store");
+    let meeting = store
+        .start_meeting("Стендап", START, "parakeet-v3-int8")
+        .expect("meeting");
+
+    let mut ids = Vec::new();
+    for (index, slot) in [(0i64, 1u32), (1, 2), (2, 3)] {
+        ids.push(
+            store
+                .append_segment(
+                    meeting.id,
+                    &NewSegment {
+                        stream: StreamKind::System,
+                        start_ms: index * 5_000,
+                        end_ms: index * 5_000 + 4_000,
+                        speaker_id: None,
+                        session_slot: Some(slot),
+                        text: format!("реплика {index}"),
+                    },
+                )
+                .expect("append"),
+        );
+    }
+    for slot in [1u32, 2, 3] {
+        store
+            .upsert_session_slot(&SessionSlot {
+                meeting_id: meeting.id,
+                slot,
+                centroid: vec![0.1 * slot as f32, 0.9],
+                model_id: "titanet-small".into(),
+                sample_path: None,
+                total_speech_ms: 4_000,
+                utterances: 1,
+                resolved_speaker_id: None,
+            })
+            .expect("slot");
+    }
+
+    // The user names the middle voice before re-running anything.
+    store
+        .name_session_slot(meeting.id, 2, "Мария", START)
+        .expect("name");
+
+    // A fresh pass decides all three were really one voice.
+    let changed = store
+        .reassign_slots(meeting.id, &[(ids[0], 1), (ids[1], 1), (ids[2], 1)])
+        .expect("reassign");
+
+    let segments = store.segments(meeting.id).expect("segments");
+    assert_eq!(changed, 1, "only the unnamed, differently-grouped line moves");
+    assert_eq!(
+        segments[1].speaker_name.as_deref(),
+        Some("Мария"),
+        "a name the user gave was overwritten"
+    );
+    assert_eq!(segments[0].session_slot, Some(1));
+    assert_eq!(segments[2].session_slot, Some(1), "should have been merged");
+
+    // Slot 3 no longer describes anything and must not linger on the review
+    // screen asking to be named.
+    let slots: Vec<u32> = store
+        .session_slots(meeting.id)
+        .expect("slots")
+        .iter()
+        .map(|s| s.slot)
+        .collect();
+    assert!(!slots.contains(&3), "an empty slot survived: {slots:?}");
+    assert!(slots.contains(&2), "the named voice's slot must remain");
+}

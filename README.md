@@ -17,12 +17,15 @@ diarization, which removes half the hard problem before a model runs.
 | M0 — capture + readiness panel | done |
 | M1 — transcription, storage, live transcript, echo suppression | done |
 | M2 — diarization and persistent voice profiles | done |
-| M3 — model manager, archive, audio retention | done |
-| M4 — Windows and Linux ports | |
+| M3 — model manager, archive, audio retention, re-diarization | done |
+| M4 — Windows and Linux ports | next |
 
 Meetings transcribe end to end and are written to Markdown as they happen.
 Remote participants are separated by voice; name one and the whole transcript
 updates, and the same person is recognised automatically in later meetings.
+Past meetings are searchable, and a meeting whose audio is still kept can have
+its speakers worked out again from the recording — which sees the whole
+conversation at once, where the live pass only ever had the past.
 
 ## Requirements
 

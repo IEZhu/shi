@@ -8,6 +8,7 @@ mod capture;
 mod config;
 mod error;
 mod models;
+mod reprocess;
 mod session;
 mod settings;
 
@@ -347,6 +348,18 @@ fn delete_meeting(state: State<'_, AppState>, meeting_id: i64) -> Result<(), App
     Ok(())
 }
 
+/// Re-run speaker attribution over a finished meeting's recording.
+#[tauri::command]
+fn reprocess_speakers(
+    state: State<'_, AppState>,
+    meeting_id: i64,
+) -> Result<reprocess::Reprocessed, AppError> {
+    let session = lock_session(&state);
+    let outcome = reprocess::speakers(&session.store(), session.config(), meeting_id)?;
+    rerender(&session, meeting_id)?;
+    Ok(outcome)
+}
+
 // ---- storage -----------------------------------------------------------
 
 /// What the app is using on disk, and for how long it keeps it.
@@ -506,6 +519,7 @@ pub fn run() {
             meeting_transcript,
             search,
             delete_meeting,
+            reprocess_speakers,
             storage_usage,
             prune_audio,
             model_catalogue,

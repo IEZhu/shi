@@ -120,6 +120,32 @@ impl AudioStore {
         directory_size(&self.root)
     }
 
+    /// Read back a stream's audio as 16 kHz mono, if it is still kept.
+    ///
+    /// Returns `None` rather than an error when there is no recording:
+    /// retention may have removed it, or the user may never have enabled it,
+    /// and neither is a failure.
+    pub fn read(&self, meeting_id: i64, stream: StreamKind) -> Option<Vec<f32>> {
+        let path = self
+            .meeting_dir(meeting_id)
+            .join(format!("{}.{COMPRESSED}", stream.as_str()));
+        if !path.is_file() {
+            return None;
+        }
+
+        let mut reader = claxon::FlacReader::open(&path)
+            .map_err(|err| tracing::warn!("cannot open {}: {err}", path.display()))
+            .ok()?;
+
+        Some(
+            reader
+                .samples()
+                .filter_map(|sample| sample.ok())
+                .map(|sample| sample as f32 / i16::MAX as f32)
+                .collect(),
+        )
+    }
+
     /// The audio files kept for a meeting, if any.
     pub fn files_for(&self, meeting_id: i64) -> Vec<PathBuf> {
         let dir = self.meeting_dir(meeting_id);

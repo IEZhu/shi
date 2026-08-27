@@ -25,6 +25,14 @@ pub enum AppError {
     #[error("cannot change settings while a meeting is running")]
     BusyRecording,
 
+    #[error(
+        "no recording kept for meeting {0} — either audio retention is off, or it has already expired"
+    )]
+    NoRecording(i64),
+
+    #[error("nothing in this meeting is long enough to identify a voice")]
+    NothingToReprocess,
+
     #[error("cannot create application directories: {0}")]
     Io(#[from] std::io::Error),
 }

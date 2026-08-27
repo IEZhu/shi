@@ -185,3 +185,104 @@ fn nothing_is_attributed_before_anyone_has_spoken() {
         Attribution::Unknown
     );
 }
+
+/// Build a "recording" by laying clips end to end, and the spans that describe
+/// where each one sits — exactly the shape a finished meeting has.
+fn recording(order: &[&str]) -> (Vec<f32>, Vec<shi_pipeline::Span>) {
+    let mut audio: Vec<f32> = Vec::new();
+    let mut spans = Vec::new();
+
+    for (index, name) in order.iter().enumerate() {
+        let (samples, duration) = clip(name);
+        let start_ms = (audio.len() as f64 / 16.0) as i64;
+        audio.extend_from_slice(&samples);
+        spans.push(shi_pipeline::Span {
+            id: index as i64,
+            start_ms,
+            end_ms: start_ms + duration.as_millis() as i64,
+        });
+        // A beat of silence between turns, as a real meeting has.
+        audio.extend(std::iter::repeat_n(0.0, 16_000 / 2));
+    }
+
+    (audio, spans)
+}
+
+#[test]
+fn reprocessing_a_recording_recovers_who_spoke() {
+    let Some(mut tracker) = tracker() else {
+        eprintln!("skipping: speaker model absent — run scripts/fetch-models.sh");
+        return;
+    };
+    let _ = &mut tracker;
+
+    let order = ["Milena_1", "Daniel_1", "Milena_2", "Daniel_2"];
+    let (audio, spans) = recording(&order);
+
+    let assignments = shi_pipeline::rediarize(
+        &tracker,
+        &audio,
+        &spans,
+        shi_pipeline::DEFAULT_SESSION_THRESHOLD,
+    );
+
+    assert_eq!(assignments.len(), 4, "every utterance should be placed");
+    let slots: Vec<u32> = assignments.iter().map(|(_, slot)| *slot).collect();
+
+    assert_eq!(slots[0], slots[2], "Milena's two turns were split apart");
+    assert_eq!(slots[1], slots[3], "Daniel's two turns were split apart");
+    assert_ne!(slots[0], slots[1], "two speakers were merged into one");
+
+    // Numbered by who spoke first, so the labels are stable and meaningful.
+    assert_eq!(slots[0], 1);
+    assert_eq!(slots[1], 2);
+}
+
+#[test]
+fn reprocessing_skips_utterances_too_short_to_place() {
+    let Some(tracker) = tracker() else {
+        eprintln!("skipping: speaker model absent");
+        return;
+    };
+
+    let (audio, mut spans) = recording(&["Milena_1", "Daniel_1"]);
+    // A two-word interjection carries no usable voice.
+    spans.push(shi_pipeline::Span {
+        id: 99,
+        start_ms: spans[0].start_ms,
+        end_ms: spans[0].start_ms + 300,
+    });
+
+    let assignments = shi_pipeline::rediarize(
+        &tracker,
+        &audio,
+        &spans,
+        shi_pipeline::DEFAULT_SESSION_THRESHOLD,
+    );
+
+    assert!(
+        assignments.iter().all(|(id, _)| *id != 99),
+        "a 300 ms span should keep its existing attribution, not be guessed at"
+    );
+    assert_eq!(assignments.len(), 2);
+}
+
+#[test]
+fn a_recording_of_one_person_yields_one_voice() {
+    let Some(tracker) = tracker() else {
+        eprintln!("skipping: speaker model absent");
+        return;
+    };
+
+    let (audio, spans) = recording(&["Daniel_1", "Daniel_2"]);
+    let assignments = shi_pipeline::rediarize(
+        &tracker,
+        &audio,
+        &spans,
+        shi_pipeline::DEFAULT_SESSION_THRESHOLD,
+    );
+
+    let slots: std::collections::HashSet<u32> =
+        assignments.iter().map(|(_, slot)| *slot).collect();
+    assert_eq!(slots.len(), 1, "one speaker was split into {slots:?}");
+}

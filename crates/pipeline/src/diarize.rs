@@ -273,3 +273,199 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
         dot / (na * nb)
     }
 }
+
+/// Group utterances by voice, seeing the whole meeting at once.
+///
+/// The online tracker decides who is speaking with only the past to go on, so
+/// an early utterance can open a slot that later evidence would have merged.
+/// Given the recording afterwards, every embedding can be compared with every
+/// other, which is strictly more information — and is why keeping the audio is
+/// worth the disk.
+///
+/// Average linkage: a cluster is joined when the *mean* similarity to it clears
+/// the threshold, so one unusually clear utterance cannot drag in a whole group.
+pub fn cluster(embeddings: &[Vec<f32>], threshold: f32) -> Vec<usize> {
+    if embeddings.is_empty() {
+        return Vec::new();
+    }
+
+    // Every utterance starts in its own cluster; merge the closest pair until
+    // nothing is close enough.
+    let mut clusters: Vec<Vec<usize>> = (0..embeddings.len()).map(|i| vec![i]).collect();
+
+    loop {
+        let mut best: Option<(usize, usize, f32)> = None;
+
+        for a in 0..clusters.len() {
+            for b in (a + 1)..clusters.len() {
+                let score = average_linkage(&clusters[a], &clusters[b], embeddings);
+                if score >= threshold && best.is_none_or(|(_, _, current)| score > current) {
+                    best = Some((a, b, score));
+                }
+            }
+        }
+
+        let Some((a, b, _)) = best else { break };
+        let merged = clusters.remove(b);
+        clusters[a].extend(merged);
+    }
+
+    // Number clusters by when their first utterance happened, so "Спикер 1" is
+    // whoever spoke first rather than an artefact of merge order.
+    clusters.sort_by_key(|members| members.iter().copied().min().unwrap_or(usize::MAX));
+
+    let mut assignment = vec![0usize; embeddings.len()];
+    for (label, members) in clusters.iter().enumerate() {
+        for member in members {
+            assignment[*member] = label;
+        }
+    }
+    assignment
+}
+
+fn average_linkage(a: &[usize], b: &[usize], embeddings: &[Vec<f32>]) -> f32 {
+    let mut total = 0.0;
+    for i in a {
+        for j in b {
+            total += cosine(&embeddings[*i], &embeddings[*j]);
+        }
+    }
+    total / (a.len() * b.len()) as f32
+}
+
+#[cfg(test)]
+mod cluster_tests {
+    use super::*;
+
+    /// Points around a centre, as embeddings of one voice would be.
+    fn around(centre: &[f32], jitter: f32, count: usize, seed: u64) -> Vec<Vec<f32>> {
+        let mut state = seed;
+        (0..count)
+            .map(|_| {
+                centre
+                    .iter()
+                    .map(|value| {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let noise = ((state >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+                        value + noise * jitter
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_voices_become_two_clusters() {
+        let mut embeddings = around(&[1.0, 0.0, 0.0], 0.05, 4, 1);
+        embeddings.extend(around(&[0.0, 1.0, 0.0], 0.05, 3, 2));
+
+        let labels = cluster(&embeddings, 0.7);
+        let distinct: std::collections::HashSet<usize> = labels.iter().copied().collect();
+        assert_eq!(distinct.len(), 2, "got {labels:?}");
+        assert!(labels[..4].iter().all(|l| *l == labels[0]));
+        assert!(labels[4..].iter().all(|l| *l == labels[4]));
+        assert_ne!(labels[0], labels[4]);
+    }
+
+    #[test]
+    fn labels_follow_who_spoke_first() {
+        let mut embeddings = around(&[0.0, 1.0, 0.0], 0.05, 2, 3);
+        embeddings.extend(around(&[1.0, 0.0, 0.0], 0.05, 2, 4));
+        let labels = cluster(&embeddings, 0.7);
+        assert_eq!(labels[0], 0, "the first utterance should be speaker 0");
+    }
+
+    #[test]
+    fn one_voice_stays_one_cluster() {
+        let embeddings = around(&[0.3, 0.9, 0.1], 0.03, 6, 5);
+        let labels = cluster(&embeddings, 0.7);
+        assert!(labels.iter().all(|l| *l == 0), "one voice split: {labels:?}");
+    }
+
+    #[test]
+    fn an_impossible_threshold_keeps_everything_apart() {
+        let embeddings = around(&[1.0, 0.0], 0.01, 4, 6);
+        let labels = cluster(&embeddings, 1.01);
+        assert_eq!(labels, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn nothing_in_nothing_out() {
+        assert!(cluster(&[], 0.7).is_empty());
+    }
+}
+
+/// One utterance's place in a recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    /// Caller's identifier, handed back with the result.
+    pub id: i64,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+/// Re-group a finished meeting's utterances by voice, using the recording.
+///
+/// Spans too short to carry a voice are skipped rather than guessed at, so they
+/// keep whatever attribution they already had. Slots are numbered from one, to
+/// match what the transcript shows.
+pub fn rediarize(
+    tracker: &SpeakerTracker,
+    audio: &[f32],
+    spans: &[Span],
+    threshold: f32,
+) -> Vec<(i64, u32)> {
+    let mut ids = Vec::new();
+    let mut embeddings = Vec::new();
+
+    for span in spans {
+        if span.end_ms - span.start_ms < MIN_FOR_EVIDENCE.as_millis() as i64 {
+            continue;
+        }
+        let Some(slice) = slice_ms(audio, span.start_ms, span.end_ms) else {
+            continue;
+        };
+        if let Some(embedding) = tracker.embed(slice) {
+            ids.push(span.id);
+            embeddings.push(embedding);
+        }
+    }
+
+    cluster(&embeddings, threshold)
+        .into_iter()
+        .zip(ids)
+        .map(|(label, id)| (id, label as u32 + 1))
+        .collect()
+}
+
+/// Mean embedding per cluster, for storing as each voice's signature.
+pub fn centroids(assignments: &[(i64, u32)], embeddings: &[Vec<f32>]) -> Vec<(u32, Vec<f32>)> {
+    let mut by_slot: std::collections::BTreeMap<u32, Vec<&Vec<f32>>> = Default::default();
+    for ((_, slot), embedding) in assignments.iter().zip(embeddings) {
+        by_slot.entry(*slot).or_default().push(embedding);
+    }
+
+    by_slot
+        .into_iter()
+        .filter_map(|(slot, members)| {
+            let dim = members.first()?.len();
+            let mut mean = vec![0.0f32; dim];
+            for member in &members {
+                for (value, incoming) in mean.iter_mut().zip(*member) {
+                    *value += incoming;
+                }
+            }
+            for value in &mut mean {
+                *value /= members.len() as f32;
+            }
+            Some((slot, mean))
+        })
+        .collect()
+}
+
+fn slice_ms(audio: &[f32], start_ms: i64, end_ms: i64) -> Option<&[f32]> {
+    let rate = ASR_SAMPLE_RATE as i64;
+    let from = (start_ms.max(0) * rate / 1000) as usize;
+    let to = ((end_ms.max(0) * rate / 1000) as usize).min(audio.len());
+    (from < to).then(|| &audio[from..to])
+}

@@ -249,3 +249,11 @@ export function formatMeetingStart(value: string): string {
     minute: "2-digit",
   });
 }
+
+/** Mirrors `reprocess::Reprocessed`. */
+export interface Reprocessed {
+  utterances: number;
+  speakersBefore: number;
+  speakersAfter: number;
+  renamed: number;
+}

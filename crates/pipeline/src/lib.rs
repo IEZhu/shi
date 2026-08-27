@@ -16,7 +16,7 @@ pub mod event;
 pub use asr::{ASR_SAMPLE_RATE, ModelPaths, SherpaTranscriber, Transcriber, Transcript};
 pub use cadence::Cadence;
 pub use diarize::{
-    Attribution, DEFAULT_KNOWN_THRESHOLD, DEFAULT_SESSION_THRESHOLD, SessionSlot,
+    Attribution, Span, centroids, cluster, rediarize, DEFAULT_KNOWN_THRESHOLD, DEFAULT_SESSION_THRESHOLD, SessionSlot,
     SpeakerTracker, Thresholds, VoiceProfile,
 };
 pub use echo::{DEFAULT_ECHO_THRESHOLD, EchoReference};

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   type ArchivedLine,
   type MeetingSummary,
+  type Reprocessed,
   type SearchResult,
   formatMeetingStart,
   formatOffset,
@@ -40,6 +41,8 @@ export function Archive({ onClose }: { onClose: () => void }) {
   const [results, setResults] = useState<SearchResult[] | null>(null);
   const [open, setOpen] = useState<MeetingSummary | null>(null);
   const [lines, setLines] = useState<ArchivedLine[]>([]);
+  const [note, setNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const timer = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -66,7 +69,31 @@ export function Archive({ onClose }: { onClose: () => void }) {
 
   const openMeeting = async (meeting: MeetingSummary) => {
     setOpen(meeting);
+    setNote(null);
     setLines(await invoke<ArchivedLine[]>("meeting_transcript", { meetingId: meeting.id }));
+  };
+
+  /// Re-run attribution over the recording, which sees the whole meeting at
+  /// once rather than deciding as it goes.
+  const reprocess = async (meeting: MeetingSummary) => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const result = await invoke<Reprocessed>("reprocess_speakers", {
+        meetingId: meeting.id,
+      });
+      setLines(await invoke<ArchivedLine[]>("meeting_transcript", { meetingId: meeting.id }));
+      setNote(
+        result.speakersBefore === result.speakersAfter && result.renamed === 0
+          ? `Ничего не изменилось: те же ${result.speakersAfter} голоса.`
+          : `Голосов было ${result.speakersBefore}, стало ${result.speakersAfter}; ` +
+            `переназначено реплик: ${result.renamed}.`,
+      );
+    } catch (error) {
+      setNote(String(error));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const remove = async (meeting: MeetingSummary) => {
@@ -167,11 +194,17 @@ export function Archive({ onClose }: { onClose: () => void }) {
               aria-label="Поиск по расшифровкам"
             />
           )}
+          {open && (
+            <button className="ghost" onClick={() => reprocess(open)} disabled={busy}>
+              Пересобрать говорящих
+            </button>
+          )}
           <button className="ghost" onClick={() => (open ? setOpen(null) : onClose())}>
             {open ? "Назад" : "Закрыть"}
           </button>
         </div>
       </header>
+      {note && <p className="notice">{note}</p>}
       {body}
     </section>
   );

@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "Meeting persistence: SQLite as the source of truth, Markdown as a projection"
 
 [dependencies]
+claxon = "0.4.3"
 flacenc = "0.5.1"
 hound = "3.5.1"
 jiff = "0.2.35"

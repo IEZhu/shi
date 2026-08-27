@@ -391,6 +391,45 @@ impl Store {
             .collect())
     }
 
+    /// Move utterances to the voices a fresh pass decided they belong to.
+    ///
+    /// A name the user already gave is left alone: that is a fact they
+    /// supplied, not a guess to be recomputed. Everything else follows the new
+    /// grouping, and slots nobody claimed are cleared out.
+    pub fn reassign_slots(
+        &mut self,
+        meeting_id: i64,
+        assignments: &[(i64, u32)],
+    ) -> Result<usize> {
+        let transaction = self.connection.transaction()?;
+        let mut changed = 0;
+
+        {
+            let mut update = transaction.prepare(
+                "UPDATE segments SET session_slot = ?2
+                 WHERE id = ?1 AND meeting_id = ?3 AND speaker_id IS NULL
+                   AND (session_slot IS NULL OR session_slot != ?2)",
+            )?;
+            for (segment_id, slot) in assignments {
+                changed += update.execute(params![segment_id, slot, meeting_id])?;
+            }
+        }
+
+        // Slots that no longer describe anything would linger on the review
+        // screen asking to be named.
+        transaction.execute(
+            "DELETE FROM session_slots
+             WHERE meeting_id = ?1
+               AND resolved_speaker_id IS NULL
+               AND slot NOT IN (SELECT DISTINCT session_slot FROM segments
+                                WHERE meeting_id = ?1 AND session_slot IS NOT NULL)",
+            params![meeting_id],
+        )?;
+
+        transaction.commit()?;
+        Ok(changed)
+    }
+
     /// Remove a meeting and everything recorded with it.
     pub fn delete_meeting(&self, meeting_id: i64) -> Result<()> {
         self.connection
