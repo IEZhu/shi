@@ -61,6 +61,16 @@ pub enum TranscriptEvent {
 }
 
 /// A meeting in progress, or the absence of one.
+/// Whether something already running has to be torn down and started again.
+///
+/// The readiness check and a meeting both hold the capture devices, so
+/// "already running" is not the same question as "already doing what was
+/// asked". A check that is running when the user presses record must be
+/// upgraded: treating it as started is what made the button do nothing at all.
+fn wants_upgrade(recording: bool, wants_meeting: bool) -> bool {
+    wants_meeting && !recording
+}
+
 /// Lets the pipeline write recordings without knowing about files or retention.
 struct RecorderTap(Recorder);
 
@@ -197,7 +207,12 @@ impl Session {
 
     fn start(&mut self, app: AppHandle, title: Option<String>) -> Result<Readiness, AppError> {
         if self.is_running() {
-            return Ok(self.readiness());
+            let recording = lock(&self.state).meeting_id.is_some();
+            if !wants_upgrade(recording, title.is_some()) {
+                return Ok(self.readiness());
+            }
+            tracing::debug!("upgrading a readiness check into a meeting");
+            self.stop();
         }
 
         // Load the recogniser before opening the microphone, not after. It
@@ -785,6 +800,22 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_running_check_is_upgraded_when_the_user_presses_record() {
+        assert!(super::wants_upgrade(false, true));
+    }
+
+    #[test]
+    fn a_running_meeting_is_left_alone() {
+        assert!(!super::wants_upgrade(true, true));
+        assert!(!super::wants_upgrade(true, false));
+    }
+
+    #[test]
+    fn checking_twice_does_not_restart_capture() {
+        assert!(!super::wants_upgrade(false, false));
+    }
+
     use super::*;
 
     /// The frontend reads these names directly, and a mismatch is invisible
