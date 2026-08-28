@@ -127,6 +127,11 @@ impl EchoReference {
         self.similarity(samples, start)
             .is_some_and(|score| score >= self.threshold)
     }
+
+    /// The score at which an utterance is called an echo.
+    pub fn threshold(&self) -> f32 {
+        self.threshold
+    }
 }
 
 impl Default for EchoReference {

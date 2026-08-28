@@ -200,6 +200,25 @@ impl Session {
             return Ok(self.readiness());
         }
 
+        // Load the recogniser before opening the microphone, not after. It
+        // takes seconds, and any audio captured while it loads is audio the
+        // user spoke after pressing record — it has to be either kept and
+        // dated correctly, or not captured at all. Loading first makes it the
+        // latter, and leaves nothing to throw away.
+        //
+        // One recogniser, shared. Loading it per stream cost 650 MB twice and,
+        // worse, started the two workers seconds apart — which put their
+        // transcripts on different timelines and left the echo detector
+        // comparing the wrong moments. sherpa-onnx declares the recogniser
+        // `Sync`, so sharing it is what the library intends.
+        let transcriber: Option<Arc<dyn Transcriber>> = match &title {
+            Some(_) => Some(Arc::new(SherpaTranscriber::load(
+                &self.config.recognizer(),
+                self.config.asr_threads,
+            )?)),
+            None => None,
+        };
+
         let streams = self.capture.start();
         for stream in [&streams.mic, &streams.system] {
             if let Err(status) = stream {
@@ -237,21 +256,24 @@ impl Session {
             None => None,
         };
 
-        // One recogniser, shared. Loading it per stream cost 650 MB twice and,
-        // worse, started the two workers seconds apart — which put their
-        // transcripts on different timelines and left the echo detector
-        // comparing the wrong moments. sherpa-onnx declares the recogniser
-        // `Sync`, so sharing it is what the library intends.
-        let transcriber: Option<Arc<dyn Transcriber>> = match meeting_id {
-            Some(_) => Some(Arc::new(SherpaTranscriber::load(
-                &self.config.recognizer(),
-                self.config.asr_threads,
-            )?)),
-            None => None,
-        };
+        let StartedStreams { mut mic, mut system } = streams;
 
-        // Taken after the model is in memory, so both streams start together
-        // and share one origin.
+        // The two sources still do not open at the same instant — the system
+        // tap waits to see a first frame — so each ring holds a different
+        // amount of audio by now. Kept, that backlog would stamp itself at time
+        // zero and put the two streams on timelines 0.93 s apart, measured,
+        // which is more than twice the window the echo detector may search.
+        // Drop it, then start the clock.
+        for handle in [&mut mic, &mut system] {
+            if let Ok(handle) = handle {
+                let dropped = handle.discard_backlog();
+                tracing::debug!(
+                    stream = %handle.info.kind,
+                    samples = dropped,
+                    "discarded pre-meeting backlog"
+                );
+            }
+        }
         let origin = Instant::now();
 
         // A meeting starts with nobody named yet.
@@ -265,7 +287,6 @@ impl Session {
         // checks itself against it.
         let echo = Arc::new(EchoReference::default());
 
-        let StartedStreams { mic, system } = streams;
         let mut meters = Vec::new();
 
         for handle in [mic, system] {

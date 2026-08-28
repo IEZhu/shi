@@ -59,6 +59,28 @@ pub struct StreamHandle {
     pub stats: Arc<StreamStats>,
 }
 
+impl StreamHandle {
+    /// Throw away whatever the ring has collected so far, and report how much.
+    ///
+    /// A source starts filling its ring the moment it is opened, but the
+    /// pipeline's clock starts later — after the model is loaded, which takes
+    /// seconds. Everything captured in between is stamped as though it happened
+    /// at time zero, which pushes that stream's whole timeline forward by the
+    /// size of its backlog. Two sources opened moments apart end up on two
+    /// different timelines: measured at 0.93 s of skew, more than twice the
+    /// window the echo detector is allowed to search, so a loudspeaker echo
+    /// could never line up with the audio that caused it.
+    ///
+    /// Called once, immediately before the clock starts.
+    pub fn discard_backlog(&mut self) -> usize {
+        let mut dropped = 0;
+        while self.consumer.pop().is_ok() {
+            dropped += 1;
+        }
+        dropped
+    }
+}
+
 /// A platform-specific way of getting audio into the pipeline.
 ///
 /// The rest of the application is written against this trait and never learns

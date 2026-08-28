@@ -81,6 +81,26 @@ fn drive(pipeline: &mut StreamPipeline, audio: &[f32]) -> Vec<PipelineEvent> {
     events
 }
 
+/// Feed audio to a source that delivered nothing for `gap` first.
+///
+/// `push` reads the wall clock itself, so a test that pushes as fast as it can
+/// never reproduces a quiet source. Stating the clock is the only way to make
+/// the pipeline insert the silence it inserts in a real meeting.
+fn drive_after_gap(
+    pipeline: &mut StreamPipeline,
+    audio: &[f32],
+    gap: Duration,
+) -> Vec<PipelineEvent> {
+    let mut events = Vec::new();
+    let mut elapsed = gap;
+    for block in audio.chunks(320) {
+        elapsed += Duration::from_secs_f32(block.len() as f32 / 16_000.0);
+        events.extend(pipeline.push_at(block, elapsed));
+    }
+    events.extend(pipeline.flush());
+    events
+}
+
 fn finals(events: &[PipelineEvent]) -> usize {
     events
         .iter()
@@ -167,6 +187,79 @@ fn talking_over_the_remote_side_is_not_suppressed() {
     assert!(
         finals(&events) > 0,
         "the user was silenced while the other side talked; suppressed {}",
+        mic.suppressed_echo()
+    );
+}
+
+#[test]
+fn suppression_survives_a_quiet_stretch_before_anyone_speaks() {
+    let Some(silero) = silero() else {
+        eprintln!("skipping: models/silero_vad.onnx absent");
+        return;
+    };
+
+    // A meeting begins, and for a while nobody says anything. Both streams
+    // insert silence to keep their clocks honest — and the reference has to
+    // carry that silence too, or every later utterance is compared against
+    // audio from a different moment.
+    let gap = Duration::from_secs(3);
+    let remote = fixture();
+
+    let reference = Arc::new(EchoReference::default());
+    let mut system = build(StreamKind::System, &silero);
+    system.publish_echo_reference(Arc::clone(&reference));
+    let system_events = drive_after_gap(&mut system, &remote, gap);
+    assert!(finals(&system_events) > 0, "the reference stream said nothing");
+
+    let mut mic = build(StreamKind::Mic, &silero);
+    mic.suppress_echo_of(Arc::clone(&reference));
+    let heard = through_the_air(&remote, Duration::from_millis(120), 0.35);
+    let mic_events = drive_after_gap(&mut mic, &heard, gap);
+
+    assert_eq!(
+        finals(&mic_events),
+        0,
+        "a quiet start slid the reference off the microphone's clock, so the \
+         speakers were transcribed a second time: {mic_events:#?}"
+    );
+    assert!(mic.suppressed_echo() > 0);
+}
+
+#[test]
+fn speaking_over_the_echo_is_not_suppressed() {
+    let Some(silero) = silero() else {
+        eprintln!("skipping: models/silero_vad.onnx absent");
+        return;
+    };
+
+    // Double talk, the case that decides whether suppression is safe to ship:
+    // the microphone carries the user's own voice *and* the speakers echoing
+    // the remote side at the same time. Dropping that utterance would delete
+    // something only the user said, which no amount of echo removal is worth.
+    let remote = fixture();
+    let reference = Arc::new(EchoReference::default());
+    let mut system = build(StreamKind::System, &silero);
+    system.publish_echo_reference(Arc::clone(&reference));
+    drive(&mut system, &remote);
+
+    let echo = through_the_air(&remote, Duration::from_millis(120), 0.35);
+    let mut local: Vec<f32> = remote.clone();
+    local.reverse();
+
+    let mixed: Vec<f32> = echo
+        .iter()
+        .zip(local.iter())
+        .map(|(e, l)| (e + l).clamp(-1.0, 1.0))
+        .collect();
+
+    let mut mic = build(StreamKind::Mic, &silero);
+    mic.suppress_echo_of(Arc::clone(&reference));
+    let events = drive(&mut mic, &mixed);
+
+    assert!(
+        finals(&events) > 0,
+        "the user was silenced for talking at the same time as the speakers; \
+         suppressed {}",
         mic.suppressed_echo()
     );
 }

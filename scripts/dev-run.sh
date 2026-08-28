@@ -8,6 +8,7 @@
 # is attributed to itself.
 #
 #   scripts/dev-run.sh readiness [args...]
+#   PKG=shi-pipeline scripts/dev-run.sh echo_probe
 set -euo pipefail
 
 EXAMPLE="${1:?usage: dev-run.sh <example-name> [args...]}"
@@ -18,7 +19,7 @@ BUNDLE_ID="io.github.iezhu.shi.dev.${EXAMPLE}"
 APP="${ROOT}/target/dev-bundles/${EXAMPLE}.app"
 LOG="${ROOT}/target/dev-bundles/${EXAMPLE}.log"
 
-cargo build --manifest-path "${ROOT}/Cargo.toml" -p shi-audio --example "${EXAMPLE}"
+cargo build --manifest-path "${ROOT}/Cargo.toml" -p "${PKG:-shi-audio}" --example "${EXAMPLE}"
 BIN="$(find "${ROOT}/target/debug/examples" -maxdepth 1 -name "${EXAMPLE}-*" -type f -perm +111 \
        -exec ls -t {} + | head -1)"
 

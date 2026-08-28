@@ -80,6 +80,9 @@ It also shows the echo problem in miniature: without headphones the microphone
 `cpal`'s `DeviceDescription::interface_type()` reports `InterfaceType::BuiltIn`
 vs `Bluetooth`/`Usb`, which is the cheap first half of the echo warning.
 
+What it took to make suppression actually fire on a real loudspeaker is in
+[echo.md](echo.md) — and it turned out to be about clocks, not about audio.
+
 ## An aggregate with only a tap in it has no clock
 
 This is the defect behind "поток запущен, но устройство не прислало ни одного

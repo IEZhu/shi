@@ -3519,11 +3519,13 @@ name = "shi-pipeline"
 version = "0.1.0"
 dependencies = [
  "hound",
+ "libc",
  "rubato",
  "sherpa-onnx",
  "shi-audio",
  "thiserror 2.0.20",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

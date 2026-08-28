@@ -244,11 +244,25 @@ impl StreamPipeline {
     }
 
     /// Whether this utterance is the speakers coming back in through the mic.
+    ///
+    /// The score is logged either way. Suppression deletes speech, so when it
+    /// misfires — or fails to fire, as it did for a long time — the number that
+    /// decided it is the only way to tell which.
     fn is_echo(&self, samples: &[f32], start: Duration) -> bool {
-        match &self.echo {
-            EchoRole::Suppress(reference) => reference.is_echo(samples, start),
-            _ => false,
-        }
+        let EchoRole::Suppress(reference) = &self.echo else {
+            return false;
+        };
+        let score = reference.similarity(samples, start);
+        let verdict = score.is_some_and(|s| s >= reference.threshold());
+        tracing::debug!(
+            stream = %self.stream,
+            at_ms = start.as_millis(),
+            score = score.map(|s| (s * 1000.0).round() / 1000.0),
+            threshold = reference.threshold(),
+            echo = verdict,
+            "echo check"
+        );
+        verdict
     }
 
     /// Feed captured audio at the source's native rate and collect whatever
@@ -348,6 +362,16 @@ impl StreamPipeline {
             // The recording has to match the timeline the transcript refers to,
             // or re-processing would slice the wrong parts of it.
             recorder.write(&silence);
+        }
+
+        // And so does the echo reference. It is indexed by how much audio it
+        // has been given, so skipping the silence here would slide the whole
+        // reference earlier by the length of every quiet stretch — and the
+        // microphone would then compare each utterance against system audio
+        // from a different moment. That is why suppression never fired: the
+        // reference was minutes off by the time anyone spoke.
+        if let EchoRole::Publish(reference) = &self.echo {
+            reference.push(&silence);
         }
 
         // Nothing was being said, so nothing is left open.

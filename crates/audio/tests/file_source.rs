@@ -134,3 +134,31 @@ fn starting_twice_is_refused() {
     source.stop();
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn the_backlog_is_dropped_so_the_clock_can_start_clean() {
+    // A source opened before the pipeline's clock starts fills its ring in the
+    // meantime. Keeping that audio would stamp it at time zero and slide the
+    // whole stream forward by however long the wait was.
+    let input: Vec<f32> = (0..8_000).map(|i| (i as f32 / 100.0).sin() * 0.3).collect();
+    let path = write_wav("backlog", &input, 1, 16_000);
+
+    let mut source = FileSource::new(&path, StreamKind::Mic, Pacing::Immediate);
+    let mut handle = source.start().expect("start");
+
+    // Let the replay put something in the ring before the clock starts.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while handle.stats.frames_captured() < 1_000 {
+        assert!(Instant::now() < deadline, "fixture never reached the ring");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let dropped = handle.discard_backlog();
+    assert!(dropped > 0, "nothing was waiting, so the test proves nothing");
+    assert!(
+        handle.consumer.pop().is_err() || dropped >= 1_000,
+        "the ring still held the backlog after discarding it"
+    );
+
+    source.stop();
+}

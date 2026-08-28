@@ -15,3 +15,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 hound = "3.5.1"
+libc = "0.2"
+tracing-subscriber = "0.3"
