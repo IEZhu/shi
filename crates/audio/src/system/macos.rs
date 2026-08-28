@@ -1,5 +1,6 @@
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::error::{AudioError, Result};
 use crate::ring::RingWriter;
@@ -20,6 +21,26 @@ unsafe extern "C" {
     fn shi_tap_sample_rate(tap: *const ShiTap) -> u32;
     fn shi_tap_channels(tap: *const ShiTap) -> u32;
     fn shi_tap_device_name(tap: *const ShiTap, buf: *mut c_char, len: usize);
+}
+
+/// How many times to build the tap before giving up on it.
+const START_ATTEMPTS: usize = 3;
+
+/// How long a healthy tap may take to deliver its first frame. Measured at
+/// roughly one IO cycle — 512 frames at 48 kHz, so ~11 ms — but device start-up
+/// is not instant, and this only has to be short enough not to stall a meeting.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(700);
+
+/// Block until the tap proves it is actually running, or the timeout expires.
+fn wait_for_first_frame(stats: &StreamStats) -> bool {
+    let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
+    while Instant::now() < deadline {
+        if stats.frames_captured() > 0 {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    stats.frames_captured() > 0
 }
 
 /// Invoked on Core Audio's device IO thread. Realtime context.
@@ -85,16 +106,38 @@ impl AudioSource for MacOsTapSource {
         let writer = Box::into_raw(Box::new(RingWriter::new(producer, Arc::clone(&stats))));
 
         let mut status: i32 = 0;
-        // SAFETY: `writer` stays valid until we call `shi_tap_stop` below.
-        let tap = unsafe { shi_tap_start(on_audio, writer as *mut c_void, &mut status) };
+        let mut tap = std::ptr::null_mut();
+        // A tap can start clean — every status noErr, the aggregate reporting
+        // its sub-device active — and still never call its IO proc. Observed
+        // on macOS 26.3 while building this; once frames do start they never
+        // stop, so the failure belongs entirely to startup and a fresh tap
+        // clears it. Refusing to hand back a stream that was never going to
+        // deliver is the whole point: a meeting that records nothing is worse
+        // than one that refuses to begin.
+        for attempt in 0..START_ATTEMPTS {
+            // SAFETY: `writer` stays valid until we call `shi_tap_stop` below.
+            tap = unsafe { shi_tap_start(on_audio, writer as *mut c_void, &mut status) };
+            if tap.is_null() {
+                // SAFETY: the tap never started, so nothing else holds this pointer.
+                drop(unsafe { Box::from_raw(writer) });
+                return Err(AudioError::Platform {
+                    context: "AudioHardwareCreateProcessTap",
+                    status,
+                });
+            }
 
-        if tap.is_null() {
-            // SAFETY: the tap never started, so nothing else holds this pointer.
-            drop(unsafe { Box::from_raw(writer) });
-            return Err(AudioError::Platform {
-                context: "AudioHardwareCreateProcessTap",
-                status,
-            });
+            // On the last attempt keep whatever we have. A tap that has not
+            // delivered yet may still wake up when something plays, which is
+            // how this worked before, and half a stream beats none. The
+            // readiness panel reports `NoFrames` either way, so nobody is
+            // told a lie about it.
+            if wait_for_first_frame(&stats) || attempt + 1 == START_ATTEMPTS {
+                break;
+            }
+
+            // SAFETY: `tap` came from `shi_tap_start` and is stopped once here.
+            unsafe { shi_tap_stop(tap) };
+            tap = std::ptr::null_mut();
         }
 
         // SAFETY: `tap` is non-null and owned by us.

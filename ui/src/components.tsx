@@ -2,8 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   type StreamStatus,
   type Turn,
-  VERDICT_LABEL,
   diagnose,
+  verdictLabel,
   formatOffset,
 } from "./types";
 
@@ -35,13 +35,16 @@ export function StreamCard({
   const seconds = status.sampleRate ? status.framesCaptured / status.sampleRate : 0;
 
   return (
-    <section className={`card verdict-${status.verdict} ${compact ? "compact" : ""}`}>
+    <section
+      className={`card verdict-${status.verdict} ${compact ? "compact" : ""}`}
+      data-kind={status.kind}
+    >
       <header>
         <div>
           <h2>{title}</h2>
           {!compact && <p className="subtitle">{subtitle}</p>}
         </div>
-        <span className="badge">{VERDICT_LABEL[status.verdict]}</span>
+        <span className="badge">{verdictLabel(status)}</span>
       </header>
 
       <div className="meter" role="meter" aria-valuenow={Math.round(level * 100)}>

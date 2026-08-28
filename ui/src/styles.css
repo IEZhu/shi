@@ -141,6 +141,8 @@ button.ghost { background: transparent; border-color: var(--line); color: var(--
 .verdict-ok .badge { color: var(--accent); border-color: currentColor; }
 .verdict-silent .badge,
 .verdict-noFrames .badge { color: var(--warn); border-color: currentColor; }
+/* A quiet system stream is waiting for someone to speak, not failing. */
+.verdict-silent[data-kind="system"] .badge { color: var(--muted); }
 .verdict-failed .badge { color: var(--danger); border-color: currentColor; }
 
 .meter {
@@ -157,6 +159,7 @@ button.ghost { background: transparent; border-color: var(--line); color: var(--
   transition: width 80ms linear;
 }
 .verdict-silent .meter-fill { background: var(--warn); }
+.verdict-silent[data-kind="system"] .meter-fill { background: var(--system); }
 
 .facts {
   display: grid;

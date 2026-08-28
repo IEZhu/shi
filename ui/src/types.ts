@@ -77,11 +77,26 @@ export const VERDICT_LABEL: Record<Verdict, string> = {
 };
 
 /**
+ * Badge text. A system stream that has heard nothing yet is waiting, not
+ * broken — nobody has spoken. The microphone has no such state: a live mic
+ * always carries a noise floor, so silence there really is a fault.
+ */
+export function verdictLabel(status: StreamStatus): string {
+  if (status.verdict === "silent" && status.kind === "system") {
+    return "тихо";
+  }
+  return VERDICT_LABEL[status.verdict];
+}
+
+/**
  * Why a stream is unusable, and what to do about it.
  *
- * `silent` is the one that matters: macOS refuses system-audio capture by
- * returning an endless stream of zeroes rather than an error, so this is the
- * only place the user ever learns the permission is missing.
+ * `silent` on the system stream is the load-bearing one: macOS refuses
+ * system-audio capture by returning an endless stream of zeroes rather than an
+ * error, so this is the only place the user ever learns the permission is
+ * missing. It cannot be told apart from a genuinely quiet room, so the copy
+ * hands the user a test they can run themselves instead of accusing them of a
+ * missing permission they may well have granted.
  */
 export function diagnose(status: StreamStatus): string | null {
   switch (status.verdict) {
@@ -91,7 +106,7 @@ export function diagnose(status: StreamStatus): string | null {
       return "поток запущен, но устройство не прислало ни одного кадра — проверьте, не занято ли оно другим приложением";
     case "silent":
       return status.kind === "system"
-        ? "кадры идут, но все сэмплы нулевые. Так macOS отказывает в захвате системного звука — вместо ошибки он отдаёт тишину. Разрешите приложению запись звука в Системных настройках → Конфиденциальность и безопасность."
+        ? "звука ещё не было. Пока никто не говорит — это нормально. Но если в звонке говорят, а полоска не двигается, значит macOS отказал в захвате: он отдаёт тишину вместо ошибки. Разрешите приложению запись звука в Системных настройках → Конфиденциальность и безопасность."
         : "кадры идут, но все сэмплы нулевые — микрофон заглушён или ему не выдан доступ";
     default:
       return null;

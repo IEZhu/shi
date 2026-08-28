@@ -16,6 +16,9 @@ struct shi_tap {
     void *ctx;
     uint32_t sample_rate;
     uint32_t channels;
+    /// Index of the tap's buffer in the aggregate's input list. The clock
+    /// sub-device contributes its own input buffers ahead of the tap's.
+    uint32_t tap_buffer;
     char device_name[256];
 };
 
@@ -34,9 +37,97 @@ static OSStatus shi_get_prop(AudioObjectID object,
     return AudioObjectGetPropertyData(object, &address, 0, NULL, io_size, out_data);
 }
 
+/// Number of buffers a device presents on one scope.
+///
+/// Input buffers are what a clock device contributes to an aggregate, and they
+/// land ahead of the tap's own buffer. Output buffers are how a built-in
+/// speaker is told apart from a built-in microphone.
+static uint32_t shi_buffer_count(AudioObjectID device, AudioObjectPropertyScope scope) {
+    if (device == kAudioObjectUnknown) {
+        return 0;
+    }
+    AudioObjectPropertyAddress address = {
+        .mSelector = kAudioDevicePropertyStreamConfiguration,
+        .mScope = scope,
+        .mElement = kAudioObjectPropertyElementMain,
+    };
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(device, &address, 0, NULL, &size) != noErr || size == 0) {
+        return 0;
+    }
+    AudioBufferList *list = malloc(size);
+    if (list == NULL) {
+        return 0;
+    }
+    uint32_t count = 0;
+    if (AudioObjectGetPropertyData(device, &address, 0, NULL, &size, list) == noErr) {
+        count = list->mNumberBuffers;
+    }
+    free(list);
+    return count;
+}
+
+/// A built-in device carrying streams on `scope`, if this Mac has one.
+///
+/// The aggregate needs a clock that will not vanish under it: AirPods
+/// disconnect and docks get unplugged, and the current default output is
+/// exactly the device most likely to do so mid-meeting. Built-in hardware
+/// cannot. As a member of a running aggregate it holds the clock steady —
+/// measured at ~94 IO callbacks per second for 100 s on a silent machine.
+///
+/// What we capture does not depend on this choice: the tap is global, so the
+/// clock only has to be stable, not the device the user is listening through.
+/// Measured by switching the default output away for 9 s mid-capture without
+/// losing a frame (docs/capture-macos.md).
+static NSString *shi_builtin_uid(AudioObjectPropertyScope scope, AudioObjectID *out_device) {
+    AudioObjectPropertyAddress address = {
+        .mSelector = kAudioHardwarePropertyDevices,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain,
+    };
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &address, 0, NULL, &size) != noErr
+        || size == 0) {
+        return nil;
+    }
+    AudioObjectID *devices = malloc(size);
+    if (devices == NULL) {
+        return nil;
+    }
+
+    NSString *found = nil;
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, 0, NULL, &size, devices)
+        == noErr) {
+        UInt32 count = size / (UInt32)sizeof(AudioObjectID);
+        for (UInt32 i = 0; i < count && found == nil; i++) {
+            UInt32 transport = 0;
+            UInt32 transport_size = sizeof(transport);
+            if (shi_get_prop(devices[i], kAudioDevicePropertyTransportType,
+                             kAudioObjectPropertyScopeGlobal, &transport_size, &transport) != noErr
+                || transport != kAudioDeviceTransportTypeBuiltIn) {
+                continue;
+            }
+            if (shi_buffer_count(devices[i], scope) == 0) {
+                continue;
+            }
+            CFStringRef uid = NULL;
+            UInt32 uid_size = sizeof(uid);
+            if (shi_get_prop(devices[i], kAudioDevicePropertyDeviceUID,
+                             kAudioObjectPropertyScopeGlobal, &uid_size, &uid) == noErr && uid) {
+                if (out_device) {
+                    *out_device = devices[i];
+                }
+                found = (__bridge_transfer NSString *)uid;
+            }
+        }
+    }
+    free(devices);
+    return found;
+}
+
 /// UID of the current default output device. The aggregate uses it as its
 /// clock source so the tap does not drift against the hardware.
-static NSString *shi_default_output_uid(NSString **out_name) {
+static NSString *shi_default_output_uid(AudioObjectID *out_device, NSString **out_name) {
     AudioObjectID device = kAudioObjectUnknown;
     UInt32 size = sizeof(device);
     if (shi_get_prop(kAudioObjectSystemObject,
@@ -44,6 +135,9 @@ static NSString *shi_default_output_uid(NSString **out_name) {
                      kAudioObjectPropertyScopeGlobal,
                      &size, &device) != noErr || device == kAudioObjectUnknown) {
         return nil;
+    }
+    if (out_device) {
+        *out_device = device;
     }
 
     CFStringRef uid = NULL;
@@ -116,8 +210,33 @@ shi_tap *shi_tap_start(shi_tap_audio_cb cb, void *ctx, int32_t *out_status) {
             return NULL;
         }
 
+        AudioObjectID output_id = kAudioObjectUnknown;
         NSString *output_name = nil;
-        NSString *output_uid = shi_default_output_uid(&output_name);
+        NSString *output_uid = shi_default_output_uid(&output_id, &output_name);
+
+        // Clock preference: a built-in output, then a built-in input, then
+        // whatever the system is currently playing through. Output first on
+        // purpose — an input sub-device would tie system-audio capture to
+        // microphone access, and measurement says it buys nothing.
+        AudioObjectID clock_id = kAudioObjectUnknown;
+        NSString *clock_uid = shi_builtin_uid(kAudioObjectPropertyScopeOutput, &clock_id);
+        if (clock_uid == nil) {
+            clock_uid = shi_builtin_uid(kAudioObjectPropertyScopeInput, &clock_id);
+        }
+        if (clock_uid == nil) {
+            clock_uid = output_uid;
+            clock_id = output_id;
+        }
+
+        // The clock device must be a *member*, not merely the named main
+        // sub-device. An aggregate holding nothing but a tap has no clock of
+        // its own: its IO proc is driven by whoever happens to be playing, so
+        // it delivers nothing at all while the machine is quiet. With a real
+        // device inside, the aggregate runs on hardware and frames arrive
+        // continuously — silence included.
+        NSArray *sub_devices = clock_uid ? @[@{
+            (__bridge NSString *)CFSTR(kAudioSubDeviceUIDKey): clock_uid,
+        }] : @[];
 
         NSMutableDictionary *aggregate = [@{
             (__bridge NSString *)CFSTR(kAudioAggregateDeviceNameKey): @"Shi Capture",
@@ -125,15 +244,15 @@ shi_tap *shi_tap_start(shi_tap_audio_cb cb, void *ctx, int32_t *out_status) {
             (__bridge NSString *)CFSTR(kAudioAggregateDeviceIsPrivateKey): @YES,
             (__bridge NSString *)CFSTR(kAudioAggregateDeviceIsStackedKey): @NO,
             (__bridge NSString *)CFSTR(kAudioAggregateDeviceTapAutoStartKey): @YES,
-            (__bridge NSString *)CFSTR(kAudioAggregateDeviceSubDeviceListKey): @[],
+            (__bridge NSString *)CFSTR(kAudioAggregateDeviceSubDeviceListKey): sub_devices,
             (__bridge NSString *)CFSTR(kAudioAggregateDeviceTapListKey): @[@{
                 (__bridge NSString *)CFSTR(kAudioSubTapUIDKey): tap_uid,
                 (__bridge NSString *)CFSTR(kAudioSubTapDriftCompensationKey): @YES,
             }],
         } mutableCopy];
 
-        if (output_uid) {
-            aggregate[(__bridge NSString *)CFSTR(kAudioAggregateDeviceMainSubDeviceKey)] = output_uid;
+        if (clock_uid) {
+            aggregate[(__bridge NSString *)CFSTR(kAudioAggregateDeviceMainSubDeviceKey)] = clock_uid;
         }
 
         AudioObjectID agg_id = kAudioObjectUnknown;
@@ -158,12 +277,14 @@ shi_tap *shi_tap_start(shi_tap_audio_cb cb, void *ctx, int32_t *out_status) {
         tap->ctx = ctx;
         tap->sample_rate = (uint32_t)asbd.mSampleRate;
         tap->channels = asbd.mChannelsPerFrame ? asbd.mChannelsPerFrame : 1;
+        tap->tap_buffer = shi_buffer_count(clock_id, kAudioObjectPropertyScopeInput);
         snprintf(tap->device_name, sizeof(tap->device_name), "System output (%s)",
                  output_name ? [output_name UTF8String] : "default");
 
         shi_tap_audio_cb callback = cb;
         void *callback_ctx = ctx;
         uint32_t fallback_channels = tap->channels;
+        uint32_t tap_buffer = tap->tap_buffer;
 
         status = AudioDeviceCreateIOProcIDWithBlock(
             &tap->proc_id, agg_id, /* dispatch queue */ NULL,
@@ -176,8 +297,10 @@ shi_tap *shi_tap_start(shi_tap_audio_cb cb, void *ctx, int32_t *out_status) {
                 if (inInputData == NULL || inInputData->mNumberBuffers == 0) {
                     return;
                 }
-                // A mono mixdown tap presents one interleaved buffer.
-                const AudioBuffer *buffer = &inInputData->mBuffers[0];
+                // A mono mixdown tap presents one interleaved buffer, but the
+                // clock device's own inputs — if it has any — come first.
+                uint32_t index = tap_buffer < inInputData->mNumberBuffers ? tap_buffer : 0;
+                const AudioBuffer *buffer = &inInputData->mBuffers[index];
                 if (buffer->mData == NULL || buffer->mDataByteSize == 0) {
                     return;
                 }

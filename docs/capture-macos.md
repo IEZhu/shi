@@ -80,11 +80,92 @@ It also shows the echo problem in miniature: without headphones the microphone
 `cpal`'s `DeviceDescription::interface_type()` reports `InterfaceType::BuiltIn`
 vs `Bluetooth`/`Usb`, which is the cheap first half of the echo warning.
 
-## The tap goes quiet, and the clock has to know
+## An aggregate with only a tap in it has no clock
 
-The system tap delivers nothing while no application is playing. Counting only
-the samples that arrive therefore makes the pipeline's idea of "now" short by
-the whole idle period.
+This is the defect behind "поток запущен, но устройство не прислало ни одного
+кадра", and it hid for a long time because every measurement that looked fine
+had something playing at the time.
+
+The aggregate was built with an empty `kAudioAggregateDeviceSubDeviceListKey`
+and the default output named only in `kAudioAggregateDeviceMainSubDeviceKey` —
+a device that is the clock master but not a member. Such an aggregate has no
+hardware to run on, so its IO proc is driven by whoever happens to be playing:
+
+| system state | frames in 20 s |
+|---|---:|
+| nothing playing | **0** |
+| playback starts at t=5 s | 6.3 s of frames in a 12.1 s window |
+
+Every status code says success throughout. `AudioDeviceStart` returns `noErr`,
+the tap exists, the aggregate exists — and nothing ever arrives.
+
+Putting a real device *inside* the sub-device list fixes it. Verified with
+`AudioObjectGetPropertyData` on the created aggregate:
+
+```
+requested sub-device: BuiltInSpeakerDevice
+full sub-device list: (BuiltInSpeakerDevice)
+active sub-devices:   1 -> BuiltInSpeakerDevice
+aggregate input:      1 buffer(s): [0]=1ch      <- the tap
+aggregate output:     1 buffer(s): [0]=2ch      <- the device
+```
+
+Frames then arrive continuously: five consecutive runs on a silent machine gave
+6.0 s of frames per 6 s run, and one uninterrupted run held ~94 IO callbacks per
+second for 100 s without a gap.
+
+### Which device to clock from
+
+Not the current default output: AirPods disconnect and docks get unplugged.
+The tap is *global* — it follows processes, not one device — so the clock only
+has to be stable, not the one the user is listening through. Measured by
+switching the default output to another device for 9 s in the middle of a 24 s
+capture: 24.0 s of frames, meter pegged throughout, not a frame lost.
+
+So the shim prefers a built-in output, which cannot be unplugged, then a
+built-in input, then the current output. Output first on purpose: an input
+sub-device would tie system-audio capture to microphone access, and measurement
+says it buys nothing — a built-in output clocks the aggregate just as steadily.
+
+### The clock device's inputs come first
+
+An aggregate presents its sub-device's input buffers ahead of the tap's, so
+`mBuffers[0]` is only the tap when the clock device has no inputs of its own.
+The shim asks the clock device how many input buffers it contributes and indexes
+past them.
+
+That the resulting stream is really the tap — and not, say, the microphone
+sitting next to it in the aggregate — was checked against a generated
+440 Hz tone at amplitude 0.25 played through the speakers:
+
+```
+peak=0.2500   rms=0.17674   dominant: 440 Hz (100.0%), harmonics 0.0%
+```
+
+Bit-exact amplitude and a theoretical RMS of 0.17678. A microphone would have
+delivered room noise and speaker harmonics at an attenuated level.
+
+The offset itself was exercised by clocking from the built-in *microphone*
+instead, which contributes one input buffer and puts the tap at index 1: same
+tone, same bit-exact result. Built-in speakers contribute none, so on this Mac
+the shipping path indexes 0.
+
+### A tap can start clean and still never run
+
+Seen twice while measuring the above: every status `noErr`, the sub-device
+listed as active, `AudioDeviceStart` returning `noErr` — and the IO proc never
+called once. It did not reproduce in the signed-app configuration (5 of 5 runs
+healthy), but once frames do start they never stop, so the failure lives
+entirely in startup. `MacOsTapSource::start` therefore waits up to 700 ms for a
+first frame and rebuilds the tap if none comes, up to three times. On the last
+attempt it keeps the stream regardless: a tap that has not delivered yet may
+still wake on playback, and the readiness panel reports `NoFrames` either way.
+
+## The tap used to go quiet, and the clock had to know
+
+Before the aggregate had a clock of its own, the tap delivered nothing while no
+application was playing. Counting only the samples that arrive therefore made
+the pipeline's idea of "now" short by the whole idle period.
 
 Measured on a meeting left silent for fifteen seconds before anyone spoke:
 
@@ -101,8 +182,13 @@ Two consequences, both real:
 - the two streams ran on different timelines, so microphone and system
   utterances interleaved in the wrong order in the transcript
 
-`StreamPipeline` now compares elapsed time against the audio it has actually
-heard and inserts silence when it falls behind, feeding it to the voice-activity
+`StreamPipeline` compares elapsed time against the audio it has actually heard
+and inserts silence when it falls behind, feeding it to the voice-activity
 detector and the recording alike so the transcript and the audio agree about
 when things happened. It only ever adds: a fixture replayed faster than real
 time is left alone, which is what keeps the tests deterministic.
+
+With the aggregate clocked properly the gap no longer opens in the first place.
+The reconciliation stays: it costs nothing when the streams are healthy, and it
+is the only thing standing between a stalled source and a transcript whose
+timestamps quietly stop matching the meeting.
