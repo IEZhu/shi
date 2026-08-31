@@ -1,0 +1,62 @@
+[
+  {
+    "file": "00-ru.wav",
+    "kind": "ru",
+    "voice": "Milena",
+    "text": "Мы увеличили количество шардов и снизили нагрузку на горячие ноды."
+  },
+  {
+    "file": "01-ru.wav",
+    "kind": "ru",
+    "voice": "Milena",
+    "text": "Максимальное сжатие на приёме стоило нам слишком дорого."
+  },
+  {
+    "file": "02-ru.wav",
+    "kind": "ru",
+    "voice": "Milena",
+    "text": "Индексы отсортировали по объёму поступающих данных."
+  },
+  {
+    "file": "03-en.wav",
+    "kind": "en",
+    "voice": "Daniel",
+    "text": "The broker lost its leader partition and the consumer group rebalanced."
+  },
+  {
+    "file": "04-en.wav",
+    "kind": "en",
+    "voice": "Daniel",
+    "text": "We increased the heap size on the hot nodes before the next deployment."
+  },
+  {
+    "file": "05-en.wav",
+    "kind": "en",
+    "voice": "Daniel",
+    "text": "Elasticsearch stores incoming documents in segments on the hot tier."
+  },
+  {
+    "file": "06-mix.wav",
+    "kind": "mix",
+    "voice": "Milena",
+    "text": "Мы посмотрели в Kibana, там consumer lag вырос, и Elasticsearch начал отдавать 429."
+  },
+  {
+    "file": "07-mix.wav",
+    "kind": "mix",
+    "voice": "Milena",
+    "text": "Нужно пересчитать shard allocation, иначе rebalance будет каждые пять минут."
+  },
+  {
+    "file": "08-mix.wav",
+    "kind": "mix",
+    "voice": "Milena",
+    "text": "Kafka не могла сделать запись в consumer offsets topic по метаданным."
+  },
+  {
+    "file": "09-mix.wav",
+    "kind": "mix",
+    "voice": "Milena",
+    "text": "Сервис отдаёт timeout, потому что thread pool забит."
+  }
+]

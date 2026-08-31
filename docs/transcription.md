@@ -268,3 +268,76 @@ tokenizer as a *directory*, so a complete model was reported as missing a file
 and never reached the recogniser. Parts now declare what they are, with the
 directory case pinned by a test — along with its opposite, so a tokenizer that
 arrives as a plain file is still rejected.
+
+## Can two models be combined into one better transcript?
+
+Not usefully, and the ceiling is measurable rather than a matter of opinion.
+
+Ten sentences were synthesised with known text — three Russian, three English,
+four mixing the two the way the meetings do ("Мы посмотрели в Kibana, там
+consumer lag вырос") — and a second copy was band-limited to 250–3600 Hz with
+noise at 22 dB SNR to approximate a call. They live in `fixtures/mixed-ru-en`
+with a manifest, so every number below is reproducible.
+
+Three recognisers decoded each file, and `scripts/rover.py` combined them the
+way ROVER does: fold each hypothesis into a word transition network by edit
+distance, then vote per slot. No model is involved in the combination.
+
+| | clean | telephone band |
+|---|---:|---:|
+| Parakeet alone | 19 % | 21 % |
+| GigaAM alone | 36 % | 38 % |
+| fast-conformer alone | 29 % | 35 % |
+| ROVER, flat vote | 19 % | 21 % |
+| ROVER, weighted by alphabet | 19 % | 21 % |
+| **best possible from these three** | **16 %** | **17 %** |
+
+The last row is the per-word oracle: align the reference into the network and
+count a word correct if *any* system produced it. No voting rule can beat it.
+Three points of headroom, and voting captured none of them, because the errors
+are correlated — the three models fail on the same words.
+
+Which words is not a mystery:
+
+| | Russian | English | mixed |
+|---|---:|---:|---:|
+| Parakeet | 4 % | 6 % | **38 %** |
+
+Russian is fine. English is fine. Every remaining error is an English technical
+term inside Russian speech.
+
+### The glossary that followed, and why it is not in the product
+
+If the errors are named entities, replace them afterwards: transliterate each
+Cyrillic token to Latin letters and match it against a list of terms the
+meetings use. `scripts/glossary.py` does that, and it repairs real cases —
+"тыбаны" → Kibana, "Кавка" → Kafka, "консьюмер" → consumer.
+
+It also turns "полка" into "Kafka". After phonetic folding the two are the same
+distance apart as the good matches are, so no threshold separates them, and
+"полка" is a word these meetings genuinely use — the hot shelves an index is
+stored on. Measured:
+
+| | clean | telephone band |
+|---|---:|---:|
+| ROVER | 19 % | 21 % |
+| \+ glossary everywhere | 24 % | 26 % |
+| \+ glossary only where the models disagree | 18 % | **25 %** |
+
+Restricting repairs to slots where the recognisers disagree — using the ensemble
+as an uncertainty detector rather than as a chooser, which is the one thing the
+oracle says it is good for — helps slightly on clean audio and hurts on the
+audio that matters. The guard that would fix this is a Russian wordlist to
+protect real words from being "repaired"; this machine has none, and tuning
+thresholds harder on a hundred-word corpus would be fitting noise.
+
+Both scripts stay as instruments. Neither is wired into the app.
+
+### What has headroom
+
+Not combination. The single-model number is the thing to move, and the only
+candidate with published evidence of doing so is Nemotron 3.5 ASR: 7.91 % WER on
+English and 9.17 % on Russian at 1.12 s chunks, with `target_lang=auto`. It
+needs an `OnlineRecognizer` path, which this project does not have — and its
+code-switching behaviour is undocumented, so that is the first thing to measure
+rather than the last.
