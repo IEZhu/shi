@@ -41,6 +41,13 @@ fn detect(dir: &Path) -> Option<ModelPaths> {
         });
     }
 
+    if has("conv_frontend.onnx") {
+        return Some(ModelPaths::qwen3(dir));
+    }
+    if has("model.int8.onnx") && has("tokens.txt") {
+        return Some(ModelPaths::omnilingual_ctc(dir));
+    }
+
     // Whisper prefixes every file with the model size: `large-v3-encoder.onnx`.
     let entry = std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
         let name = e.file_name().to_string_lossy().into_owned();

@@ -219,3 +219,52 @@ because the English above is what it does to the other half.
 
 `compare_models` is the harness; point it at a WAV and a list of model
 directories and it prints what each one heard.
+
+## The newer models, and why none of them replaced Parakeet
+
+Four months after the comparison above, three model families had appeared that
+sherpa-onnx can run offline and that claim Russian and English. All three were
+tested on the same clips.
+
+| model | released | WER on the mixed clip | vs realtime |
+|---|---|---:|---:|
+| Parakeet TDT 0.6B v3 | 2025-08 | **17 %** | 13–15× |
+| Qwen3-ASR 0.6B int8 | 2026-03 | 35 % | 5.0× |
+| Omnilingual ASR 300M v2 int8 | 2026-02 | — | 6.5× |
+| Nemotron 3.5 ASR 0.6B | 2026-06 | not run | — |
+
+**Qwen3-ASR** advertises code-switching, and it is the only model in any of
+these runs that spelled *Elasticsearch* correctly. It also translated the
+Russian half of the clip into English — "We postponed the deployment. Some
+consumer lag virus." — and on real meeting audio it invents. Among its output
+for a sentence about Elasticsearch storing letters on shelves is an obscenity
+nobody said, twice. That is what an LLM-based recogniser does when the audio is
+unclear: it writes something fluent. For a transcript that records what
+colleagues said, a confident invention is worse than a garbled word, so this one
+is disqualified on a property rather than on its error rate. Raising
+`max_new_tokens` from the default 128 to 1024 changed nothing — the library did
+warn about truncation, and it was not the cause.
+
+**Omnilingual ASR** (1600 languages, CTC) mixes alphabets inside single words:
+"vыras", "nаgrуsкой", "sortilication nе успеваl". Unusable as it stands.
+
+**Nemotron 3.5 ASR** is packaged only in cache-aware *streaming* form, which
+needs sherpa-onnx's `OnlineRecognizer` — a code path this project does not have.
+Its published numbers are good (7.91 % WER English, 9.17 % Russian at 1.12 s
+chunks) and it accepts `target_lang=auto`, so it is the one worth the
+integration work if the current transcript ever stops being good enough. Nothing
+about its code-switching behaviour is documented, which after Qwen3 is the first
+thing to measure rather than the last.
+
+The support code for Qwen3 and Omnilingual stays: `ModelPaths` now covers both,
+so trying the next release of either costs a download rather than a change.
+Neither is in the catalogue, because the catalogue only offers models that were
+listened to and kept.
+
+### One bug fell out of this
+
+`ModelPaths::verify` checked every part with `is_file`. Qwen3 ships its
+tokenizer as a *directory*, so a complete model was reported as missing a file
+and never reached the recogniser. Parts now declare what they are, with the
+directory case pinned by a test — along with its opposite, so a tokenizer that
+arrives as a plain file is still rejected.
