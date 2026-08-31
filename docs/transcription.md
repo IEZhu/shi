@@ -152,3 +152,70 @@ installed, so every subsequent launch crashed the same way and the app never
 offered to fetch it again. A complete `.part` left by a failed install is now
 recognised too, since asking a server to resume from the end of a complete file
 earns a 416 rather than the bytes.
+
+## Choosing a model for Russian and English in the same sentence
+
+Four recognisers, the same 240 s of a real meeting — Russian speech carrying
+English technical terms — plus a short clip with a known reference so the
+comparison has a number in it and not only an opinion.
+
+Speed first, on this machine, four threads:
+
+| model | vs realtime |
+|---|---:|
+| NeMo fast-conformer, 10 languages | 77.6× |
+| GigaAM v3 (Russian) | 20.7× |
+| Parakeet TDT 0.6B v3 int8 | 14.8× |
+| Whisper large-v3 int8 | **0.9×** |
+
+Whisper large-v3 is slower than the meeting it is transcribing. An hour of call
+costs an hour of machine, which rules it out for anything but a short excerpt
+regardless of how well it hears.
+
+### The mixed-language clip
+
+A sentence of English followed by a Russian sentence with English terms in it,
+generated with a known reference, so word error rate is measurable:
+
+| model | WER | words returned | Cyrillic share |
+|---|---:|---:|---:|
+| **Parakeet TDT 0.6B v3** | **17 %** | 46 | 30 % |
+| fast-conformer 10 languages | 42 % | 43 | 3 % |
+| GigaAM v3 | 50 % | 46 | 32 % |
+| Whisper large-v3 | 62 % | 21 | 64 % |
+
+The reference is 48 words and 27 % Cyrillic. The last two columns say more than
+the WER does:
+
+- **Whisper returned 21 words of 48** — it dropped the entire English sentence
+  and transcribed only the Russian. Whisper commits to one language per decoding
+  window, and when a window contains two it keeps one. This is structural, not a
+  tuning knob, and it applies to `whisper-turbo` as well.
+- **fast-conformer returned 3 % Cyrillic** where the reference has 27 %: its
+  English is excellent, and then it writes the Russian half in Latin letters —
+  "Tam consumer leg weros". It never switched back.
+- **GigaAM** renders English as pseudo-English: "Insuma Group Robalance Bi Is
+  the Broker Lost It's Leader portition".
+- **Parakeet** is the only one that put each language in its own alphabet inside
+  a single utterance, and its Cyrillic share lands nearest the reference.
+
+So the model already shipping as the default wins the case it was chosen for,
+and by a wide margin. That is worth stating plainly because the measurement was
+run expecting to replace it.
+
+### Where Parakeet does lose
+
+On Russian alone GigaAM v3 is clearly better. From the same meeting:
+
+| | Parakeet | GigaAM v3 |
+|---|---|---|
+| | "было максимальное **жатие**" | "было максимальное **сжатие**" |
+| | "…" (dropped) | "**Кавка**, она не могла сделать запись" |
+| | "количество шардов **подкаргоин**" | "количество ша{r}дов **под каждого индекса нужно**" |
+
+It also punctuates and marks hesitations. It is in the catalogue as
+`giga-am-v3-russian` for meetings that are Russian throughout — and only those,
+because the English above is what it does to the other half.
+
+`compare_models` is the harness; point it at a WAV and a list of model
+directories and it prints what each one heard.

@@ -47,6 +47,33 @@ impl ModelPaths {
         }
     }
 
+    /// A NeMo transducer directory, whichever precision each part happens to
+    /// be in.
+    ///
+    /// Packages are not consistent: Parakeet quantises all three parts, the
+    /// multilingual fast-conformer quantises none, and GigaAM ships a
+    /// quantised encoder beside a full-precision decoder and joiner. Insisting
+    /// on one suffix throughout rejects models that work perfectly well, so
+    /// each file is resolved on its own, preferring the smaller one.
+    pub fn nemo_transducer(dir: impl AsRef<Path>) -> Self {
+        let dir = dir.as_ref();
+        let part = |stem: &str| {
+            [".int8.onnx", ".onnx"]
+                .iter()
+                .map(|suffix| dir.join(format!("{stem}{suffix}")))
+                .find(|path| path.is_file())
+                // Nothing on disk: hand back the conventional name so
+                // `verify` can name the file that is missing.
+                .unwrap_or_else(|| dir.join(format!("{stem}.onnx")))
+        };
+        Self::NemoTransducer {
+            encoder: part("encoder"),
+            decoder: part("decoder"),
+            joiner: part("joiner"),
+            tokens: dir.join("tokens.txt"),
+        }
+    }
+
     /// A directory laid out the way sherpa-onnx ships Whisper, whose files
     /// carry the size as a prefix: `turbo-encoder.int8.onnx` and so on.
     pub fn whisper_int8(dir: impl AsRef<Path>, prefix: &str) -> Self {
@@ -220,5 +247,83 @@ impl Transcriber for SherpaTranscriber {
 
     fn model_id(&self) -> &str {
         &self.model_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directory holding exactly the files named, each one byte long.
+    fn laid_out(name: &str, files: &[&str]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("shi-asr-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create model dir");
+        for file in files {
+            std::fs::write(dir.join(file), b"x").expect("write model file");
+        }
+        dir
+    }
+
+    fn parts(paths: &ModelPaths) -> Vec<String> {
+        paths
+            .files()
+            .into_iter()
+            .map(|(_, path)| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_fully_quantised_package_is_recognised() {
+        let dir = laid_out(
+            "quantised",
+            &["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"],
+        );
+        let paths = ModelPaths::nemo_transducer(&dir);
+        assert!(paths.verify().is_ok());
+        assert_eq!(
+            parts(&paths),
+            ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"]
+        );
+    }
+
+    #[test]
+    fn a_full_precision_package_is_recognised() {
+        let dir = laid_out(
+            "full",
+            &["encoder.onnx", "decoder.onnx", "joiner.onnx", "tokens.txt"],
+        );
+        let paths = ModelPaths::nemo_transducer(&dir);
+        assert!(paths.verify().is_ok());
+        assert_eq!(
+            parts(&paths),
+            ["encoder.onnx", "decoder.onnx", "joiner.onnx", "tokens.txt"]
+        );
+    }
+
+    #[test]
+    fn a_package_mixing_precisions_is_recognised() {
+        // GigaAM ships exactly this: a quantised encoder, everything else full.
+        // Requiring one suffix throughout would reject a working model.
+        let dir = laid_out(
+            "mixed",
+            &["encoder.int8.onnx", "decoder.onnx", "joiner.onnx", "tokens.txt"],
+        );
+        let paths = ModelPaths::nemo_transducer(&dir);
+        assert!(paths.verify().is_ok());
+        assert_eq!(
+            parts(&paths),
+            ["encoder.int8.onnx", "decoder.onnx", "joiner.onnx", "tokens.txt"]
+        );
+    }
+
+    #[test]
+    fn a_missing_file_is_named_rather_than_guessed_at() {
+        let dir = laid_out("incomplete", &["encoder.onnx", "decoder.onnx", "tokens.txt"]);
+        let error = ModelPaths::nemo_transducer(&dir).verify().unwrap_err();
+        assert!(
+            format!("{error}").contains("joiner"),
+            "the error must say which file is missing, said: {error}"
+        );
     }
 }

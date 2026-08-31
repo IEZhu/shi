@@ -92,7 +92,7 @@ impl Config {
             Family::Whisper => {
                 ModelPaths::whisper_int8(dir, spec.file_prefix.unwrap_or_default())
             }
-            _ => ModelPaths::parakeet_int8(dir),
+            _ => ModelPaths::nemo_transducer(dir),
         }
     }
 

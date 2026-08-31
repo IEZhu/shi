@@ -122,7 +122,7 @@ pub const CATALOGUE: &[ModelSpec] = &[
         kind: ModelKind::Recognizer,
         family: Family::NemoTransducer,
         display_name: "Parakeet TDT 0.6B v3",
-        summary: "Быстрее Whisper в разы, точнее на европейских языках",
+        summary: "Единственная, кто держит русский и английский в одной фразе",
         languages: "25 европейских языков, включая русский",
         url: concat!(
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/",
@@ -137,11 +137,30 @@ pub const CATALOGUE: &[ModelSpec] = &[
         default: true,
     },
     ModelSpec {
+        id: "giga-am-v3-russian",
+        kind: ModelKind::Recognizer,
+        family: Family::NemoTransducer,
+        display_name: "GigaAM v3 (русский)",
+        summary: "Лучшая по русскому, но английскую речь превращает в бессмыслицу",
+        languages: "только русский",
+        url: concat!(
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/",
+            "sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16.tar.bz2"
+        ),
+        download_bytes: 170_197_019,
+        integrity: Integrity::Observed(
+            "f9620a0099019c6afcee26525ef9ed3297fa50dd5691c1902af0c948fc1a470b",
+        ),
+        install: Install::Archive("sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16"),
+        file_prefix: None,
+        default: false,
+    },
+    ModelSpec {
         id: "whisper-turbo",
         kind: ModelKind::Recognizer,
         family: Family::Whisper,
         display_name: "Whisper turbo",
-        summary: "Языков больше всех, но заметно медленнее Parakeet",
+        summary: "Языков больше всех, но выбрасывает вторую половину смешанной речи",
         languages: "100+ языков",
         url: concat!(
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/",
