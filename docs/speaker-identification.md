@@ -80,3 +80,44 @@ That is why the numbers are settings rather than constants, and why the harness
 exists: point `calibrate` at a directory of real meeting clips and it re-derives
 them. Until that is done, treat 0.75 as a starting point chosen to fail in the
 safe direction.
+
+## The first real meeting, and how far off the numbers were
+
+A 71-minute conference call, captured with `meeting_capture` and clustered with
+`diarize_sweep`: 184 utterances on the system stream, through a Bluetooth
+headset at 16 kHz — the harsh end of the range, not the easy one.
+
+```
+pairwise cosine: min -0.165  p10 0.086  median 0.330  p90 0.809  max 0.976
+```
+
+The structure predicted above is there: different voices sit near 0.1, the same
+voice near 0.8. What the synthetic corpus got wrong is the *height* of that
+upper mode. Real same-voice pairs top out around 0.81, so a threshold of 0.70
+merges almost nothing:
+
+| threshold | clusters |
+|---:|---:|
+| 0.40 | 13 |
+| 0.45 | 14 |
+| 0.50 | 16 |
+| 0.60 | 27 |
+| **0.70** | **52** |
+| 0.80 | 86 |
+
+Ground truth, from a participant: a large call in which two or three people did
+nearly all the talking, with others joining occasionally to ask something.
+
+At 0.45 the clustering says 34 min, 14 min, 6 min, 5 min, and ten voices under a
+minute each. That is the meeting. At the shipped 0.70 it says fifty-two people,
+which is not.
+
+So the doc above was right that the gap would narrow, and wrong about how much:
+0.70 is not conservative on real audio, it is simply broken. One meeting is one
+data point and one headset is one microphone, so this is not yet a new default —
+but it is the first evidence from outside the synthesiser, and it points down by
+about 0.25.
+
+`relabel_transcript` applies a chosen threshold to an existing transcript from
+the saved recording, so trying another value costs seconds rather than another
+hour of recognition.
