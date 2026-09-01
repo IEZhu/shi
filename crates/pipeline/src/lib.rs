@@ -13,7 +13,10 @@ pub mod engine;
 pub mod error;
 pub mod event;
 
-pub use asr::{ASR_SAMPLE_RATE, ModelPaths, SherpaTranscriber, Transcriber, Transcript};
+pub use asr::{
+    ASR_SAMPLE_RATE, ModelPaths, SherpaTranscriber, StreamingTranscriber, Transcriber,
+    Transcript, load_recognizer,
+};
 pub use cadence::Cadence;
 pub use diarize::{
     Attribution, LiveNames, Span, centroids, cluster, rediarize, DEFAULT_KNOWN_THRESHOLD, DEFAULT_SESSION_THRESHOLD, SessionSlot,

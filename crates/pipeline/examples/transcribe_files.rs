@@ -10,10 +10,20 @@
 
 use std::path::PathBuf;
 
-use shi_pipeline::{ModelPaths, SherpaTranscriber, Transcriber};
+use shi_pipeline::{ModelPaths, Transcriber, load_recognizer};
 
 fn detect(dir: &std::path::Path) -> Option<ModelPaths> {
     let has = |name: &str| dir.join(name).is_file();
+    if has("tokens.txt")
+        && dir
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains("streaming"))
+    {
+        // Nemotron ships the same four files as Parakeet but needs the online
+        // decoder. Nothing inside the directory says so; in the app the model
+        // catalogue declares it, and here the name is all there is.
+        return Some(ModelPaths::streaming_transducer(dir, Some("auto")));
+    }
     if has("conv_frontend.onnx") {
         return Some(ModelPaths::qwen3(dir));
     }
@@ -30,12 +40,19 @@ fn detect(dir: &std::path::Path) -> Option<ModelPaths> {
 }
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_target(false)
+        .without_time()
+        .with_writer(std::io::stderr)
+        .init();
+
     let mut args = std::env::args().skip(1);
     let dir = PathBuf::from(args.next().expect("usage: transcribe_files <model dir> <wav>..."));
     let files: Vec<PathBuf> = args.map(PathBuf::from).collect();
 
     let paths = detect(&dir).expect("unrecognised model layout");
-    let model = SherpaTranscriber::load(&paths, 4).expect("load model");
+    let model = load_recognizer(&paths, 4).expect("load model");
 
     for file in files {
         let mut reader = hound::WavReader::open(&file).expect("open wav");

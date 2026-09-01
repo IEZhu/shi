@@ -4,6 +4,7 @@ use std::time::Duration;
 use sherpa_onnx::{
     OfflineOmnilingualAsrCtcModelConfig, OfflineQwen3ASRModelConfig, OfflineRecognizer,
     OfflineRecognizerConfig, OfflineTransducerModelConfig, OfflineWhisperModelConfig,
+    OnlineRecognizer, OnlineRecognizerConfig, OnlineTransducerModelConfig,
 };
 
 use crate::error::{PipelineError, Result};
@@ -52,6 +53,17 @@ pub enum ModelPaths {
     },
     /// Omnilingual ASR — one CTC model, one token list, no separate decoder.
     OmnilingualCtc { model: PathBuf, tokens: PathBuf },
+    /// A cache-aware *streaming* transducer, decoded here one whole utterance
+    /// at a time. Nemotron 3.5 is packaged only in this form.
+    StreamingTransducer {
+        encoder: PathBuf,
+        decoder: PathBuf,
+        joiner: PathBuf,
+        tokens: PathBuf,
+        /// Per-stream language, or `None` to leave the model's own default.
+        /// "auto" asks it to detect.
+        language: Option<String>,
+    },
     /// Whisper — encoder and decoder only.
     Whisper {
         encoder: PathBuf,
@@ -121,6 +133,18 @@ impl ModelPaths {
         }
     }
 
+    /// A directory laid out the way sherpa-onnx ships Nemotron 3.5.
+    pub fn streaming_transducer(dir: impl AsRef<Path>, language: Option<&str>) -> Self {
+        let dir = dir.as_ref();
+        Self::StreamingTransducer {
+            encoder: dir.join("encoder.int8.onnx"),
+            decoder: dir.join("decoder.int8.onnx"),
+            joiner: dir.join("joiner.int8.onnx"),
+            tokens: dir.join("tokens.txt"),
+            language: language.map(str::to_string),
+        }
+    }
+
     /// A directory laid out the way sherpa-onnx ships Whisper, whose files
     /// carry the size as a prefix: `turbo-encoder.int8.onnx` and so on.
     pub fn whisper_int8(dir: impl AsRef<Path>, prefix: &str) -> Self {
@@ -162,6 +186,18 @@ impl ModelPaths {
             ModelPaths::OmnilingualCtc { model, tokens } => {
                 vec![("model", model, Expect::File), ("tokens", tokens, Expect::File)]
             }
+            ModelPaths::StreamingTransducer {
+                encoder,
+                decoder,
+                joiner,
+                tokens,
+                ..
+            } => vec![
+                ("encoder", encoder, Expect::File),
+                ("decoder", decoder, Expect::File),
+                ("joiner", joiner, Expect::File),
+                ("tokens", tokens, Expect::File),
+            ],
             ModelPaths::Whisper {
                 encoder,
                 decoder,
@@ -277,6 +313,12 @@ impl SherpaTranscriber {
                     model: Some(model.to_string_lossy().into_owned()),
                 };
                 config.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
+            }
+            ModelPaths::StreamingTransducer { .. } => {
+                // Caught here rather than silently producing an empty
+                // recogniser: this model needs the online decoder, and
+                // `load_recognizer` is what routes it there.
+                return Err(PipelineError::RecognizerCreateFailed);
             }
             ModelPaths::Whisper {
                 encoder,
@@ -448,4 +490,163 @@ mod tests {
             "the error must say which file is missing, said: {error}"
         );
     }
+}
+
+/// A cache-aware streaming recogniser, driven one whole utterance at a time.
+///
+/// Nemotron 3.5 is published only in streaming form, but this application has
+/// no use for partial results from it: the voice-activity detector has already
+/// closed the utterance by the time anything is decoded. So a stream is created
+/// per utterance, fed the whole thing, told the input is finished, and drained.
+/// The chunking stays inside sherpa-onnx where it belongs.
+pub struct StreamingTranscriber {
+    recognizer: OnlineRecognizer,
+    model_id: String,
+    /// The key this build of sherpa-onnx accepts for a per-stream language,
+    /// discovered by asking rather than assumed, and the value to set.
+    language: Option<(String, String)>,
+}
+
+/// Names a per-stream language option has gone by. The first one the library
+/// admits to knowing is used; if none is known the model keeps its default.
+const LANGUAGE_OPTION_KEYS: [&str; 4] = ["language", "target_lang", "lang", "target_language"];
+
+impl StreamingTranscriber {
+    pub fn load(paths: &ModelPaths, threads: i32) -> Result<Self> {
+        paths.verify()?;
+        let ModelPaths::StreamingTransducer {
+            encoder,
+            decoder,
+            joiner,
+            tokens,
+            language,
+        } = paths
+        else {
+            return Err(PipelineError::RecognizerCreateFailed);
+        };
+
+        let mut config = OnlineRecognizerConfig::default();
+        config.model_config.num_threads = threads.max(1);
+        config.model_config.transducer = OnlineTransducerModelConfig {
+            encoder: Some(encoder.to_string_lossy().into_owned()),
+            decoder: Some(decoder.to_string_lossy().into_owned()),
+            joiner: Some(joiner.to_string_lossy().into_owned()),
+        };
+        config.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
+
+        let recognizer =
+            OnlineRecognizer::create(&config).ok_or(PipelineError::RecognizerCreateFailed)?;
+
+        let language = language.as_ref().and_then(|value| {
+            let probe = recognizer.create_stream();
+            let key = LANGUAGE_OPTION_KEYS
+                .iter()
+                .find(|key| probe.has_option(key))
+                .map(|key| key.to_string());
+            match &key {
+                Some(key) => tracing::info!(key, value, "streaming recogniser takes a language"),
+                // sherpa-onnx 1.13.6 registers no per-stream options at all —
+                // `SetOption` is a stub there — so this is the normal path
+                // today, and `examples/probe_options` is how to tell when a
+                // later release changes that.
+                None => tracing::warn!(
+                    tried = ?LANGUAGE_OPTION_KEYS,
+                    "streaming recogniser accepts no language option; using its default"
+                ),
+            }
+            key.map(|key| (key, value.clone()))
+        });
+
+        let model_id = paths
+            .directory()
+            .and_then(|d| d.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "streaming-recognizer".into());
+
+        Ok(Self {
+            recognizer,
+            model_id,
+            language,
+        })
+    }
+}
+
+/// Silence added before and after each utterance.
+///
+/// A cache-aware model spends its first chunk warming up and needs one more to
+/// push the last of the audio through. Handed an utterance with neither, it
+/// returned "Broker lost its leader partition and the consumer group" for a
+/// sentence that began "The" and ended "rebalanced" — clipped at both ends.
+/// One chunk of padding each side is what the exported model's chunk size asks
+/// for; going wider costs decode time and buys nothing.
+const PADDING: Duration = Duration::from_millis(1120);
+
+impl StreamingTranscriber {
+    /// Whether the library recognises a per-stream option by this name.
+    ///
+    /// The names are not documented, so `examples/probe_options` uses this to
+    /// find out rather than the code guessing.
+    pub fn knows_option(&self, key: &str) -> bool {
+        self.recognizer.create_stream().has_option(key)
+    }
+
+    /// The option's current value, for the same reason.
+    pub fn option(&self, key: &str) -> String {
+        self.recognizer.create_stream().get_option(key)
+    }
+}
+
+impl Transcriber for StreamingTranscriber {
+    fn transcribe(&self, samples: &[f32]) -> Result<Transcript> {
+        let pad = (PADDING.as_secs_f32() * ASR_SAMPLE_RATE as f32) as usize;
+        let mut padded = Vec::with_capacity(samples.len() + 2 * pad);
+        padded.resize(pad, 0.0);
+        padded.extend_from_slice(samples);
+        padded.resize(padded.len() + pad, 0.0);
+
+        let stream = self.recognizer.create_stream();
+        if let Some((key, value)) = &self.language {
+            stream.set_option(key, value);
+        }
+        stream.accept_waveform(ASR_SAMPLE_RATE as i32, &padded);
+        stream.input_finished();
+        while self.recognizer.is_ready(&stream) {
+            self.recognizer.decode(&stream);
+        }
+
+        let Some(result) = self.recognizer.get_result(&stream) else {
+            return Ok(Transcript::default());
+        };
+        // Timestamps are relative to the padded audio; the caller's clock
+        // starts where the speech does.
+        let token_offsets = result
+            .timestamps
+            .unwrap_or_default()
+            .into_iter()
+            .map(|at| Duration::from_secs_f32(at).saturating_sub(PADDING))
+            .collect();
+        Ok(Transcript {
+            text: result.text.trim().to_string(),
+            tokens: result.tokens,
+            token_offsets,
+        })
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+}
+
+/// Build whichever recogniser the paths describe.
+///
+/// Offline and streaming models need different decoders, and which one a
+/// directory holds is a property of the model rather than a choice the caller
+/// should have to make.
+pub fn load_recognizer(paths: &ModelPaths, threads: i32) -> Result<std::sync::Arc<dyn Transcriber>> {
+    Ok(match paths {
+        ModelPaths::StreamingTransducer { .. } => {
+            std::sync::Arc::new(StreamingTranscriber::load(paths, threads)?)
+        }
+        _ => std::sync::Arc::new(SherpaTranscriber::load(paths, threads)?),
+    })
 }

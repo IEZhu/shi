@@ -341,3 +341,68 @@ English and 9.17 % on Russian at 1.12 s chunks, with `target_lang=auto`. It
 needs an `OnlineRecognizer` path, which this project does not have — and its
 code-switching behaviour is undocumented, so that is the first thing to measure
 rather than the last.
+
+## Nemotron 3.5, and the option that is not there yet
+
+The integration was built: `ModelPaths::StreamingTransducer`, a
+`StreamingTranscriber` over sherpa-onnx's `OnlineRecognizer`, and
+`load_recognizer` to route a directory to whichever decoder it needs. A
+streaming model is decoded one whole utterance at a time — the voice-activity
+detector has already closed the utterance, so partial results are of no use
+here, and the chunking stays inside the library.
+
+Two things had to be right.
+
+**Padding.** A cache-aware model spends its first chunk warming its cache and
+needs another to push the last of the audio through. Handed a bare utterance it
+returned
+
+```
+Broker lost its leader partition and the consumer group
+```
+
+for a sentence that began "The" and ended "rebalanced" — clipped at both ends.
+One chunk of silence each side fixes it exactly, and with it the same sentence
+comes back word for word:
+
+```
+The broker lost its leader partition and the consumer group rebalanced
+```
+
+`tests/streaming.rs` pins that, and skips when the model is not installed.
+
+**The language, which cannot be set.** The model's own README says to "use
+per-stream language strings such as `en`, `ja`, or `auto`", and NVIDIA's
+published figures — 7.91 % English, 9.17 % Russian — are quoted *with language
+input*. sherpa-onnx exposes `SherpaOnnxOnlineStreamSetOption` for this. Asked
+whether it knows any of twenty plausible keys — `language`, `target_lang`,
+`lang`, `prompt_index` and the rest — this build answers no to all of them:
+
+```
+options this model admits to knowing:
+  none of 20 candidates
+```
+
+`SetOption` is still an open feature request upstream, and 1.13.6 is the newest
+crate published, so there is no version to move to. The model therefore runs in
+whatever mode it defaults to.
+
+Measured that way, on the same corpus:
+
+| | overall | ru | en | mix |
+|---|---:|---:|---:|---:|
+| Parakeet TDT 0.6B v3 | **19 %** | 4 % | 6 % | 38 % |
+| Nemotron 3.5 (clean) | 29 % | 17 % | 9 % | 52 % |
+| Parakeet, telephone band | **21 %** | 8 % | 9 % | 38 % |
+| Nemotron 3.5, telephone band | 36 % | 33 % | 12 % | 57 % |
+
+Its English is close to Parakeet's — 9 % against 6 % — and its Russian is four
+times worse. That shape is what a model defaulting to English looks like, which
+fits the missing selector rather than contradicting the published numbers. It
+is not evidence that the numbers are wrong; it is evidence that they are out of
+reach from Rust today.
+
+So the default stays Parakeet, and the streaming path stays in the codebase
+with `examples/probe_options` next to it. The day a sherpa-onnx release
+registers a language option, this becomes a download and one string rather than
+an integration.

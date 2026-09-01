@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use shi_audio::StreamKind;
 use shi_pipeline::{
-    ModelPaths, PipelineEvent, SherpaTranscriber, StreamPipeline, Transcriber, VadSettings,
+    ModelPaths, PipelineEvent, StreamPipeline, Transcriber, VadSettings, load_recognizer,
 };
 
 /// Work out how a model directory is laid out, rather than being told.
@@ -41,6 +41,16 @@ fn detect(dir: &Path) -> Option<ModelPaths> {
         });
     }
 
+    if has("tokens.txt")
+        && dir
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains("streaming"))
+    {
+        // Nemotron ships the same four files as Parakeet but needs the online
+        // decoder. Nothing inside the directory says so; in the app the model
+        // catalogue declares it, and here the name is all there is.
+        return Some(ModelPaths::streaming_transducer(dir, Some("auto")));
+    }
     if has("conv_frontend.onnx") {
         return Some(ModelPaths::qwen3(dir));
     }
@@ -108,8 +118,8 @@ fn main() {
         };
 
         let loading = Instant::now();
-        let transcriber: Arc<dyn Transcriber> = match SherpaTranscriber::load(&paths, 4) {
-            Ok(t) => Arc::new(t),
+        let transcriber: Arc<dyn Transcriber> = match load_recognizer(&paths, 4) {
+            Ok(t) => t,
             Err(err) => {
                 println!("{name}: would not load: {err}");
                 report.push_str(&format!("\n## {name}\n\nНе загрузилась: {err}\n"));
