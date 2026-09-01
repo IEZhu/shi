@@ -263,3 +263,52 @@ fn speaking_over_the_echo_is_not_suppressed() {
         mic.suppressed_echo()
     );
 }
+
+#[test]
+fn a_quiet_talker_reaches_the_recogniser_at_a_usable_level() {
+    let Some(silero) = silero() else {
+        eprintln!("skipping: models/silero_vad.onnx absent");
+        return;
+    };
+
+    // What the recogniser is handed, rather than what it makes of it: the
+    // fixture is scaled down to the level a Bluetooth headset actually
+    // delivered, and the pipeline has to undo that before decoding.
+    use std::sync::Mutex;
+    #[derive(Default)]
+    struct Levels(Mutex<Vec<f32>>);
+    impl Transcriber for Levels {
+        fn transcribe(&self, samples: &[f32]) -> shi_pipeline::Result<Transcript> {
+            let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len().max(1) as f32)
+                .sqrt();
+            self.0.lock().unwrap().push(rms);
+            Ok(Transcript::default())
+        }
+        fn model_id(&self) -> &str {
+            "levels"
+        }
+    }
+
+    let heard = Arc::new(Levels::default());
+    let mut pipeline = StreamPipeline::new(
+        StreamKind::Mic,
+        16_000,
+        &silero,
+        heard.clone(),
+        VadSettings::default(),
+    )
+    .expect("build pipeline");
+
+    let faint: Vec<f32> = fixture().iter().map(|s| s * 0.01).collect();
+    drive(&mut pipeline, &faint);
+
+    let levels = heard.0.lock().unwrap();
+    assert!(!levels.is_empty(), "nothing was decoded");
+    for level in levels.iter() {
+        assert!(
+            *level > 0.02,
+            "an utterance reached the recogniser at {level:.4}, far below what a \
+             model expects; levelling did not happen"
+        );
+    }
+}

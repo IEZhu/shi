@@ -10,6 +10,7 @@ use crate::asr::{ASR_SAMPLE_RATE, Transcriber};
 use crate::cadence::Cadence;
 use crate::diarize::{LiveNames, SessionSlot, SpeakerTracker};
 use crate::echo::EchoReference;
+use crate::preprocess::{self, Settings as PreprocessSettings};
 use crate::error::{PipelineError, Result};
 use crate::event::PipelineEvent;
 
@@ -112,6 +113,8 @@ pub struct StreamPipeline {
     draft_showing: bool,
     echo: EchoRole,
     suppressed: u64,
+    preprocess: PreprocessSettings,
+    denoiser: Option<crate::preprocess::Denoiser>,
     /// Present only on the stream that carries several people.
     speakers: Option<SpeakerTracker>,
     recorder: Option<Box<dyn AudioTap>>,
@@ -167,6 +170,8 @@ impl StreamPipeline {
             draft_showing: false,
             echo: EchoRole::default(),
             suppressed: 0,
+            preprocess: PreprocessSettings::default(),
+            denoiser: None,
             speakers: None,
             recorder: None,
         })
@@ -215,6 +220,18 @@ impl StreamPipeline {
             .unwrap_or_default()
     }
 
+    /// Choose what happens to an utterance before the recogniser sees it.
+    pub fn preprocess_with(&mut self, settings: PreprocessSettings) {
+        self.preprocess = settings;
+    }
+
+    /// Attach a denoiser. Measured to cost accuracy on every corpus tried here,
+    /// so nothing switches it on by default — it exists to be re-measured when
+    /// a better model appears.
+    pub fn denoise_with(&mut self, denoiser: crate::preprocess::Denoiser) {
+        self.denoiser = Some(denoiser);
+    }
+
     /// Publish this stream's audio so another can recognise it echoing back.
     /// Belongs on the system stream.
     pub fn publish_echo_reference(&mut self, reference: Arc<EchoReference>) {
@@ -241,6 +258,28 @@ impl StreamPipeline {
     /// instead of wondering why they are missing from their own transcript.
     pub fn suppressed_echo(&self) -> u64 {
         self.suppressed
+    }
+
+    /// The audio as the recogniser should hear it.
+    ///
+    /// Returned separately from the utterance itself: the echo detector and the
+    /// speaker embedder are calibrated against what was actually captured, and
+    /// only the recogniser wants the levelled version.
+    fn for_recognition(&self, samples: &[f32]) -> Vec<f32> {
+        let mut prepared = samples.to_vec();
+        if self.preprocess.remove_dc {
+            preprocess::remove_dc(&mut prepared);
+        }
+        if self.preprocess.normalize {
+            let gain = preprocess::normalize(&mut prepared);
+            if gain != 1.0 {
+                tracing::trace!(stream = %self.stream, gain, "levelled an utterance");
+            }
+        }
+        if let Some(denoiser) = &self.denoiser {
+            denoiser.run(&mut prepared);
+        }
+        prepared
     }
 
     /// Whether this utterance is the speakers coming back in through the mic.
@@ -414,7 +453,8 @@ impl StreamPipeline {
             }
 
             let began = Instant::now();
-            let transcript = match self.transcriber.transcribe(&samples) {
+            let prepared = self.for_recognition(&samples);
+            let transcript = match self.transcriber.transcribe(&prepared) {
                 Ok(t) => t,
                 Err(err) => {
                     tracing::warn!(stream = %self.stream, "final decode failed: {err}");
@@ -501,7 +541,11 @@ impl StreamPipeline {
         }
 
         let began = Instant::now();
-        let transcript = self.transcriber.transcribe(window).ok()?;
+        // The draft is the same audio the final will be, so it gets the same
+        // treatment — otherwise the grey text and the black text that replaces
+        // it would come from two different signals.
+        let prepared = self.for_recognition(window);
+        let transcript = self.transcriber.transcribe(&prepared).ok()?;
         let elapsed = began.elapsed();
         self.cadence
             .observe(samples_to_duration(window.len() as u64), elapsed);

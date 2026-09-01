@@ -406,3 +406,60 @@ So the default stays Parakeet, and the streaming path stays in the codebase
 with `examples/probe_options` next to it. The day a sherpa-onnx release
 registers a language option, this becomes a download and one string rather than
 an integration.
+
+## Levelling the audio before the recogniser sees it
+
+The first real recording made with this application had a microphone stream
+sitting between 0.001 and 0.009 RMS — forty decibels below what a recogniser is
+trained on. That is worth fixing before reaching for a better model.
+
+`preprocess.rs` does three things, each switchable and each measured on its own:
+remove any constant offset, bring the utterance to 0.08 RMS (about -22 dBFS,
+where broadcast speech sits) with the gain capped and the peak protected from
+clipping, and optionally denoise.
+
+Measured with Parakeet on the same corpus at three loudness levels:
+
+| corpus | untouched | levelled | gain |
+|---|---:|---:|---:|
+| telephone band, RMS 0.02 | 21 % | 21 % | none |
+| quiet, RMS 0.002 | 21 % | 19 % | 2 points |
+| very quiet, RMS 0.0005 | **43 %** | **24 %** | **19 points** |
+
+The gain grows as the audio gets quieter and vanishes when it does not need to
+exist, which is what a real effect looks like as opposed to a lucky run. At
+0.0005 RMS the recogniser was losing nearly half its words and levelling brings
+it back to within a few points of the loud version.
+
+Two details are load-bearing:
+
+- **The gain is capped at 40 dB.** Not from taste: reaching the target from the
+  quiet end of that first real recording needs 38 dB. Lower and the audio this
+  exists for stays too quiet; higher and it starts amplifying rooms.
+- **Only the recogniser sees the levelled audio.** The echo detector and the
+  speaker embedder keep the original, because their thresholds were calibrated
+  against what the microphone actually captured.
+
+### The denoiser is off, and stays off
+
+GTCRN, run over the same utterances before decoding:
+
+| | telephone band | quiet |
+|---|---:|---:|
+| levelled | 21 % | 19 % |
+| levelled and denoised | 25 % | 26 % |
+
+Four to seven points worse. A denoiser trained to please the ear removes
+exactly the low-energy detail a recogniser leans on. The code stays —
+`denoise_with` attaches one — so that the next model can be measured rather
+than argued about.
+
+### Why the language is not chosen per utterance
+
+Routing each utterance to the model that handles its language is the obvious
+companion to this, and the numbers say it is not worth building yet. Parakeet
+is best or tied in every category on this corpus except Russian through a
+telephone band, where GigaAM scores 4 % against its 8 %. That is one third of
+the material and a four-point difference, bought with a second model resident in
+memory and a language detector in front of it. The measurement is here if the
+balance changes.

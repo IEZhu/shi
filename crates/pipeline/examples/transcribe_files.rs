@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use shi_pipeline::{ModelPaths, Transcriber, load_recognizer};
+use shi_pipeline::{ModelPaths, Transcriber, load_recognizer, preprocess};
 
 fn detect(dir: &std::path::Path) -> Option<ModelPaths> {
     let has = |name: &str| dir.join(name).is_file();
@@ -54,12 +54,32 @@ fn main() {
     let paths = detect(&dir).expect("unrecognised model layout");
     let model = load_recognizer(&paths, 4).expect("load model");
 
+    let denoiser = std::env::var("DENOISER").ok().map(|path| {
+        preprocess::Denoiser::load(&path, 4).expect("load denoiser")
+    });
+
     for file in files {
         let mut reader = hound::WavReader::open(&file).expect("open wav");
         let samples: Vec<f32> = reader
             .samples::<i16>()
             .map(|s| s.expect("sample") as f32 / i16::MAX as f32)
             .collect();
+        // PRE names the stages to run, so a preprocessing step can be
+        // measured on its own rather than as part of a bundle.
+        let stages = std::env::var("PRE").unwrap_or_default();
+        let mut samples = samples;
+        if stages.contains("dc") {
+            preprocess::remove_dc(&mut samples);
+        }
+        if stages.contains("norm") {
+            preprocess::normalize(&mut samples);
+        }
+        if stages.contains("denoise")
+            && let Some(denoiser) = denoiser.as_ref()
+        {
+            denoiser.run(&mut samples);
+        }
+
         let text = model
             .transcribe(&samples)
             .map(|t| t.text)

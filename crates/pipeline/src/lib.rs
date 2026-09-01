@@ -9,6 +9,7 @@ pub mod asr;
 pub mod cadence;
 pub mod diarize;
 pub mod echo;
+pub mod preprocess;
 pub mod engine;
 pub mod error;
 pub mod event;
@@ -23,6 +24,7 @@ pub use diarize::{
     SpeakerTracker, Thresholds, VoiceProfile,
 };
 pub use echo::{DEFAULT_ECHO_THRESHOLD, EchoReference};
+pub use preprocess::{Denoiser, Settings as PreprocessSettings};
 pub use engine::{AudioTap, StreamPipeline, VadSettings};
 pub use event::PipelineEvent;
 pub use error::{PipelineError, Result};
