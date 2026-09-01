@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { StreamCard, Transcript } from "./components";
 import { Archive } from "./archive";
+import { Corrections } from "./corrections";
 import { ModelManager } from "./models";
 import { ReviewScreen, SpeakerToast } from "./speakers";
 import { useTranscript } from "./useTranscript";
@@ -31,6 +32,7 @@ export function App() {
   const [reviewing, setReviewing] = useState<number | null>(null);
   const [managingModels, setManagingModels] = useState(false);
   const [browsing, setBrowsing] = useState(false);
+  const [fixingWords, setFixingWords] = useState(false);
   const unlisten = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -134,6 +136,9 @@ export function App() {
               <button className="ghost" onClick={() => setBrowsing(true)}>
                 Архив
               </button>
+              <button className="ghost" onClick={() => setFixingWords(true)}>
+                Словарь
+              </button>
               <button className="ghost" onClick={() => setManagingModels(true)}>
                 Модели
               </button>
@@ -163,7 +168,7 @@ export function App() {
       )}
       {failure && <p className="notice error">{failure}</p>}
 
-      {!browsing && !managingModels && (
+      {!browsing && !managingModels && !fixingWords && (
         <div className="streams">
           <StreamCard
             title="Микрофон"
@@ -181,6 +186,8 @@ export function App() {
       )}
 
       {browsing && <Archive onClose={() => setBrowsing(false)} />}
+
+      {fixingWords && <Corrections onClose={() => setFixingWords(false)} />}
 
       {managingModels && (
         <ModelManager
@@ -200,7 +207,7 @@ export function App() {
         />
       )}
 
-      {recording && !browsing && !managingModels && (
+      {recording && !browsing && !managingModels && !fixingWords && (
         <>
           <div className="transcript-head">
             <h2>Транскрипт</h2>
@@ -226,7 +233,7 @@ export function App() {
 
       {/* One at a time: a stack of cards during a call is worse than the
           problem it solves. The rest wait for the review screen. */}
-      {recording && !browsing && !managingModels && discovered.length > 0 && (
+      {recording && !browsing && !managingModels && !fixingWords && discovered.length > 0 && (
         <SpeakerToast
           key={discovered[0]}
           slot={discovered[0]}

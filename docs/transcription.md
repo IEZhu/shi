@@ -562,3 +562,71 @@ the same wall. It is a vocabulary failure, and a word-level decision made
 without the sentence around it cannot fix it: "полка" and "Kafka" are the same
 distance apart as the repairs that work. The context that separates them exists
 only in the finished transcript.
+
+## The dictionary the user teaches
+
+Three experiments aimed at language selection failed against the same wall, and
+the wall is a closed set of named entities every model mangles identically. The
+context that would separate "полка" from "Kafka" does not exist at the moment a
+recogniser emits a word — but it does exist in the finished transcript, in front
+of the person who was in the meeting.
+
+So the transcript is editable, and an edit is read for what it teaches. Correct
+one line and the term is repaired in every other line, in every past meeting,
+and in the ones still to come. `corrections.rs` holds the mechanism.
+
+Nothing is guessed. A form is replaced only if the user replaced it themselves
+at least once, which is the guard the transliterating glossary never had.
+
+### What a rule is keyed on
+
+Not the phonetics, and not the word boundaries.
+
+The failed glossary matched by transliterating Cyrillic and comparing — and
+after phonetic folding "полка" sits as close to "Kafka" as the repairs that
+work. Here the key is the letters the recogniser committed to, folded to lower
+case with `ё` mapped to `е`, which it cannot emit anyway.
+
+Word boundaries are dropped from the key, and that is a measurement rather than
+a convenience. The same term came back as "сред пул" on clean audio and
+"средпул" through a telephone band; "тайм-аут" and "таймаут" appear in the same
+corpus. Where a transducer puts a space is a guess it makes differently every
+time. The letters are steady, so one rule covers every spelling of the gap. A
+comma is different — that is a claim about the sentence, not a guess about a
+boundary — so a phrase never matches across one.
+
+### It transfers to recordings it never saw
+
+The claim worth testing is that a repair taught once keeps working. Determinism
+is only partial: on the degraded corpus Parakeet wrote "КБ" where the clean
+audio gave "Тыбаны", and no dictionary can bridge that.
+
+`examples/dictionary_transfer` measures what does survive. It corrects the four
+mixed sentences of one corpus, then applies the rules to the *other* corpus and
+scores it.
+
+| taught on | applied to | overall | ru | en | mix |
+|---|---|---:|---:|---:|---:|
+| clean | degraded | 21 % → **18 %** | 8 % → 8 % | 9 % → 9 % | 38 % → **31 %** |
+| degraded | clean | 19 % → **15 %** | 4 % → 4 % | 6 % → 6 % | 38 % → **29 %** |
+
+Russian and English are untouched to the point. That is the check the glossary
+failed, and it passes here because nothing fires on a word the user did not
+personally correct.
+
+Worth putting beside the ensemble numbers: the best conceivable selection from
+three recognisers — the oracle no voting or splicing rule can beat — was 15 % on
+the clean corpus and 18 % on the degraded one. The dictionary reaches both,
+from a single model, on audio it was not taught on.
+
+### What it does not do
+
+A rule fires on the letters it was taught. When the recogniser mangles a term
+into something else entirely, the rule misses, and the transcript is exactly as
+wrong as before — no worse. That is the honest shape of the feature: it never
+guesses, so it never damages, and its coverage grows only as fast as the user
+corrects things.
+
+`hits` is stored per rule and shown in the dictionary panel for that reason. A
+rule that has never fired is a rule that was taught on a form the recogniser has
+not produced since, and the user can drop it.

@@ -3,6 +3,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 use shi_audio::StreamKind;
 
+use crate::corrections::{self, Correction, Corrections};
 use crate::error::{Result, StoreError};
 use crate::model::{
     MATCH_CLOSE, MATCH_OPEN, Meeting, NewSegment, Segment, SearchHit, SessionSlot, Speaker,
@@ -502,6 +503,108 @@ impl Store {
 
         transaction.commit()?;
         Ok(speaker)
+    }
+
+    // ---- learned repairs ------------------------------------------------
+
+    /// Rewrite one segment's text and learn whatever the edit taught.
+    ///
+    /// The two halves are deliberately one call and one transaction. Saving
+    /// the line without the rules would leave the same word wrong on every
+    /// other line; saving the rules without the line would leave the user
+    /// looking at the text they just corrected.
+    pub fn edit_segment(&mut self, segment_id: i64, text: &str, now: &str) -> Result<usize> {
+        let transaction = self.connection.transaction()?;
+
+        let before: String = transaction.query_row(
+            "SELECT text FROM segments WHERE id = ?1",
+            params![segment_id],
+            |row| row.get(0),
+        )?;
+
+        transaction.execute(
+            "UPDATE segments SET text = ?2 WHERE id = ?1",
+            params![segment_id, text],
+        )?;
+
+        let learned = corrections::learn(&before, text);
+        for rule in &learned {
+            // A repeated correction of the same form replaces the old rule:
+            // the user has changed their mind about how a term is written, and
+            // the newer answer is the one they want everywhere.
+            transaction.execute(
+                "INSERT INTO corrections (wrong, heard, right, created_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (wrong) DO UPDATE SET heard = ?2, right = ?3, created_at = ?4",
+                params![rule.wrong, rule.heard, rule.right, now],
+            )?;
+        }
+
+        transaction.commit()?;
+        Ok(learned.len())
+    }
+
+    /// Every rule, most recently taught first.
+    pub fn corrections(&self) -> Result<Vec<Correction>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, wrong, heard, right, created_at, hits FROM corrections
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(Correction {
+                id: row.get(0)?,
+                wrong: row.get(1)?,
+                heard: row.get(2)?,
+                right: row.get(3)?,
+                created_at: row.get(4)?,
+                hits: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// The rules compiled into something that can be applied to text.
+    pub fn dictionary(&self) -> Result<Corrections> {
+        let mut statement =
+            self.connection.prepare("SELECT wrong, right FROM corrections")?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<(String, String)>, _>>()?;
+        Ok(Corrections::new(rows))
+    }
+
+    /// Teach a rule directly, without an edit to infer it from.
+    pub fn teach(&self, wrong: &str, right: &str, now: &str) -> Result<()> {
+        let Some(rule) = corrections::learn(wrong, right).into_iter().next() else {
+            return Err(StoreError::NotUsable {
+                what: "correction".into(),
+                why: "the two forms are the same word, or one of them is empty".into(),
+            });
+        };
+        self.connection.execute(
+            "INSERT INTO corrections (wrong, heard, right, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (wrong) DO UPDATE SET heard = ?2, right = ?3, created_at = ?4",
+            params![rule.wrong, rule.heard, rule.right, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn forget_correction(&self, id: i64) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM corrections WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Record that rules fired, so a rule nobody needs can be spotted.
+    pub fn count_hits(&self, fired: &[String]) -> Result<()> {
+        for phrase in fired {
+            self.connection.execute(
+                "UPDATE corrections SET hits = hits + 1 WHERE wrong = ?1",
+                params![phrase],
+            )?;
+        }
+        Ok(())
     }
 }
 

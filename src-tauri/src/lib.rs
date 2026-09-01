@@ -18,6 +18,7 @@ use capture::Readiness;
 use config::Config;
 use error::AppError;
 use serde::Serialize;
+use shi_store::corrections;
 use models::{CatalogueEntry, Downloads};
 use session::Session;
 use settings::Settings;
@@ -258,7 +259,11 @@ fn rerender(session: &Session, meeting_id: i64) -> Result<(), AppError> {
     let store = session.store();
     let guard = store.lock().unwrap_or_else(|p| p.into_inner());
     let meeting = guard.meeting(meeting_id)?;
-    let segments = guard.segments(meeting_id)?;
+    let mut segments = guard.segments(meeting_id)?;
+    // Repairs are applied on the way out, never written back, so a rule taught
+    // tomorrow reaches every meeting already recorded.
+    let fired = corrections::repair(&mut segments, &guard.dictionary()?);
+    guard.count_hits(&fired)?;
     let config = session.config();
     let path = config.markdown_path(&meeting);
     shi_store::markdown::write_to(&path, &meeting, &segments, &config.markdown())?;
@@ -302,8 +307,10 @@ fn meeting_transcript(
     let store = session.store();
     let guard = store.lock().unwrap_or_else(|p| p.into_inner());
 
-    Ok(guard
-        .segments(meeting_id)?
+    let mut segments = guard.segments(meeting_id)?;
+    corrections::repair(&mut segments, &guard.dictionary()?);
+
+    Ok(segments
         .into_iter()
         .map(|segment| ArchivedLine {
             id: segment.id,
@@ -362,6 +369,112 @@ fn reprocess_speakers(
     let outcome = reprocess::speakers(&session.store(), session.config(), meeting_id)?;
     rerender(&session, meeting_id)?;
     Ok(outcome)
+}
+
+
+// ---- learned repairs ---------------------------------------------------
+
+/// One rule the transcript has been taught.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LearnedCorrection {
+    id: i64,
+    /// The matching key. Letters only — shown nowhere, used for everything.
+    wrong: String,
+    /// The same form as it appeared in the transcript, which is what a person
+    /// can recognise.
+    heard: String,
+    right: String,
+    created_at: String,
+    hits: i64,
+}
+
+impl From<shi_store::Correction> for LearnedCorrection {
+    fn from(correction: shi_store::Correction) -> Self {
+        Self {
+            id: correction.id,
+            wrong: correction.wrong,
+            heard: correction.heard,
+            right: correction.right,
+            created_at: correction.created_at,
+            hits: correction.hits,
+        }
+    }
+}
+
+/// What one edit changed, so the UI can say what it just learned.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditOutcome {
+    learned: usize,
+    corrections: Vec<LearnedCorrection>,
+}
+
+/// Rewrite one line, and keep whatever it taught about the vocabulary.
+#[tauri::command]
+fn edit_segment(
+    state: State<'_, AppState>,
+    meeting_id: i64,
+    segment_id: i64,
+    text: String,
+) -> Result<EditOutcome, AppError> {
+    let session = lock_session(&state);
+    let learned = {
+        let store = session.store();
+        let mut guard = store.lock().unwrap_or_else(|p| p.into_inner());
+        guard.edit_segment(segment_id, text.trim(), &jiff::Zoned::now().to_string())?
+    };
+    if learned > 0 {
+        tracing::info!(learned, "the transcript learned new vocabulary");
+    }
+    rerender(&session, meeting_id)?;
+    Ok(EditOutcome {
+        learned,
+        corrections: corrections_of(&session)?,
+    })
+}
+
+#[tauri::command]
+fn corrections(state: State<'_, AppState>) -> Result<Vec<LearnedCorrection>, AppError> {
+    corrections_of(&lock_session(&state))
+}
+
+/// Add a rule by hand, for a term the user knows is coming.
+#[tauri::command]
+fn teach_correction(
+    state: State<'_, AppState>,
+    wrong: String,
+    right: String,
+) -> Result<Vec<LearnedCorrection>, AppError> {
+    let session = lock_session(&state);
+    {
+        let store = session.store();
+        let guard = store.lock().unwrap_or_else(|p| p.into_inner());
+        guard.teach(wrong.trim(), right.trim(), &jiff::Zoned::now().to_string())?;
+    }
+    corrections_of(&session)
+}
+
+/// Drop a rule. Past Markdown keeps whatever it was rendered with until the
+/// meeting is re-rendered, which is what the archive view does when opened.
+#[tauri::command]
+fn forget_correction(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<Vec<LearnedCorrection>, AppError> {
+    let session = lock_session(&state);
+    {
+        let store = session.store();
+        let guard = store.lock().unwrap_or_else(|p| p.into_inner());
+        guard.forget_correction(id)?;
+    }
+    corrections_of(&session)
+}
+
+fn corrections_of(session: &Session) -> Result<Vec<LearnedCorrection>, AppError> {
+    let store = session.store();
+    let guard = store.lock().unwrap_or_else(|p| p.into_inner());
+    Ok(guard.corrections()?.into_iter().map(Into::into).collect())
 }
 
 // ---- storage -----------------------------------------------------------
@@ -524,6 +637,10 @@ pub fn run() {
             search,
             delete_meeting,
             reprocess_speakers,
+            edit_segment,
+            corrections,
+            teach_correction,
+            forget_correction,
             storage_usage,
             prune_audio,
             model_catalogue,

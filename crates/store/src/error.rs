@@ -6,6 +6,9 @@ pub enum StoreError {
     #[error("meeting {0} not found")]
     UnknownMeeting(i64),
 
+    #[error("this {what} cannot be used: {why}")]
+    NotUsable { what: String, why: String },
+
     #[error("writing {path}: {source}")]
     Write {
         path: String,

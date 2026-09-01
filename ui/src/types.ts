@@ -266,6 +266,25 @@ export function formatMeetingStart(value: string): string {
 }
 
 /** Mirrors `reprocess::Reprocessed`. */
+/** Mirrors `LearnedCorrection`. One repair the transcript has been taught. */
+export interface LearnedCorrection {
+  id: number;
+  /** The matching key: letters only, word boundaries dropped. */
+  wrong: string;
+  /** The same form as it appeared in the transcript. */
+  heard: string;
+  /** The form the user wrote. Applied exactly as typed. */
+  right: string;
+  createdAt: string;
+  hits: number;
+}
+
+/** Mirrors `EditOutcome`. */
+export interface EditOutcome {
+  learned: number;
+  corrections: LearnedCorrection[];
+}
+
 export interface Reprocessed {
   utterances: number;
   speakersBefore: number;

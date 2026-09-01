@@ -6,6 +6,7 @@
 //! rewrite of a file the user may have already edited.
 
 pub mod audio;
+pub mod corrections;
 pub mod error;
 pub mod markdown;
 pub mod model;
@@ -13,6 +14,7 @@ mod schema;
 pub mod store;
 
 pub use audio::{AudioStore, RECORDING_SAMPLE_RATE, Recorder};
+pub use corrections::{Correction, Corrections};
 pub use error::{Result, StoreError};
 pub use markdown::{MarkdownOptions, render, write_to};
 pub use model::{

@@ -248,6 +248,22 @@ button.ghost { background: transparent; border-color: var(--line); color: var(--
 .turn.draft .said { color: var(--muted); font-style: italic; }
 .turn.draft .who { opacity: 0.7; }
 
+/* An archived line invites correction, but quietly: the hint appears on
+   hover rather than dressing every line as a form field. */
+.said.correctable { cursor: text; border-radius: 3px; padding: 0 2px; margin: 0 -2px; }
+.said.correctable:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+.said.editable {
+  width: 100%;
+  font: inherit;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 4px;
+  padding: 2px 4px;
+  resize: vertical;
+}
+
 /* --- naming voices ------------------------------------------------------ */
 
 /* A corner card, never a dialog: the user is in a meeting and needs to be

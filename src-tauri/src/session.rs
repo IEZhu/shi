@@ -9,7 +9,9 @@ use shi_pipeline::{
     Attribution, AudioTap, EchoReference, LiveNames, PipelineEvent, SherpaTranscriber, SpeakerTracker,
     StreamPipeline, Thresholds, Transcriber, VadSettings, VoiceProfile,
 };
-use shi_store::{AudioStore, NewSegment, Recorder, SessionSlot, Store, markdown};
+use shi_store::{
+    AudioStore, Corrections, NewSegment, Recorder, SessionSlot, Store, corrections, markdown,
+};
 use tauri::{AppHandle, Emitter};
 
 use crate::capture::{Capture, Readiness, StreamStatus, StartedStreams, READINESS_EVENT};
@@ -625,6 +627,8 @@ fn emit_events(
     events: Vec<PipelineEvent>,
 ) -> bool {
     let mut stored = false;
+    // Compiled on demand: most batches carry no finalised line at all.
+    let mut dictionary: Option<Corrections> = None;
 
     for event in events {
         let payload = match event {
@@ -684,6 +688,16 @@ fn emit_events(
                 };
                 stored = true;
 
+                // The stored line keeps whatever the recogniser said; only the
+                // line on screen is repaired, so a rule taught later still
+                // reaches this meeting when it is re-rendered. Loaded once per
+                // batch rather than per utterance, which is often enough for a
+                // rule taught mid-meeting to reach the next sentence.
+                let repaired = dictionary
+                    .get_or_insert_with(|| lock(store).dictionary().unwrap_or_default())
+                    .apply(&text)
+                    .0;
+
                 if let Some(slot) = discovered
                     && app
                         .emit(TRANSCRIPT_EVENT, &TranscriptEvent::SpeakerDiscovered { slot })
@@ -699,7 +713,7 @@ fn emit_events(
                     end_ms: segment.end_ms,
                     speaker: name,
                     slot,
-                    text,
+                    text: repaired,
                 }
             }
         };
@@ -769,7 +783,7 @@ fn persist_slots(
 /// renamed after the fact is corrected everywhere at once.
 fn render_markdown(store: &Arc<Mutex<Store>>, config: &Config, meeting_id: i64) {
     let store = lock(store);
-    let (meeting, segments) = match (store.meeting(meeting_id), store.segments(meeting_id)) {
+    let (meeting, mut segments) = match (store.meeting(meeting_id), store.segments(meeting_id)) {
         (Ok(meeting), Ok(segments)) => (meeting, segments),
         (meeting, segments) => {
             if let Err(err) = meeting {
@@ -781,6 +795,18 @@ fn render_markdown(store: &Arc<Mutex<Store>>, config: &Config, meeting_id: i64) 
             return;
         }
     };
+
+    // Learned repairs are applied here rather than stored, so a term corrected
+    // next week reaches the file this meeting wrote today.
+    match store.dictionary() {
+        Ok(dictionary) => {
+            let fired = corrections::repair(&mut segments, &dictionary);
+            if let Err(err) = store.count_hits(&fired) {
+                tracing::warn!("cannot record correction usage: {err}");
+            }
+        }
+        Err(err) => tracing::warn!("cannot read the correction dictionary: {err}"),
+    }
 
     let path = config.markdown_path(&meeting);
     if let Err(err) = markdown::write_to(&path, &meeting, &segments, &config.markdown()) {

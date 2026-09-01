@@ -111,6 +111,26 @@ const MIGRATIONS: &[&str] = &[
 
     INSERT INTO segments_fts (rowid, text) SELECT id, text FROM segments;
     "#,
+    // 4 — repairs the user has taught the transcript
+    //
+    // Keyed by the form the recogniser produces, folded to lower case with ё
+    // mapped to е, because that is the only form it can ever emit. The
+    // replacement is stored exactly as the user wrote it and applied verbatim:
+    // the recogniser's capitalisation of a term it does not know is noise, and
+    // inferring case from noise is how "полка" became "Kafka" last time.
+    r#"
+    CREATE TABLE corrections (
+        id         INTEGER PRIMARY KEY,
+        -- The matching key: folded letters with the word boundaries dropped.
+        wrong      TEXT    NOT NULL UNIQUE,
+        -- The same thing as the user actually saw it, so the dictionary is
+        -- readable. "консумерлэк" is a good key and a terrible label.
+        heard      TEXT    NOT NULL,
+        right      TEXT    NOT NULL,
+        created_at TEXT    NOT NULL,
+        hits       INTEGER NOT NULL DEFAULT 0
+    );
+    "#,
 ];
 
 /// Bring a database up to the current schema. Safe to call on every open.
