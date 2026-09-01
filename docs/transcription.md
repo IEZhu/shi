@@ -465,3 +465,100 @@ Parakeet is best or tied in every category on this corpus except Russian through
 a telephone band, where GigaAM scores 4 % against its 8 %. That is one third of
 the material and four points, against a second model resident in memory and a
 language detector in front of it. The measurement is here if the balance changes.
+
+## Two monolingual recognisers, spliced
+
+The proposal: stop asking one multilingual model to handle both languages. Run
+a Russian specialist and an English specialist over the same audio and merge the
+two transcripts, taking each word from whichever model owns its language.
+
+This is not the ROVER experiment above. Voting asks which hypothesis is most
+popular and cannot help when every system is wrong on the same word. Splicing
+asks which recogniser is competent for the word in front of it, which is a
+different question and deserved its own measurement.
+
+Until now the pool held no monolingual English model at all — Parakeet v3,
+fast-conformer and Whisper are all multilingual, and GigaAM is Russian-only. So
+**Parakeet TDT 0.6B v2 int8** was added: the English-only sibling of the model
+already in use, same architecture, same file layout, top of the Open ASR
+leaderboard for English. `scripts/splice.py` does the merging and the scoring.
+
+| | overall | ru | en | mix |
+|---|---:|---:|---:|---:|
+| Parakeet v3 (multilingual) | **19 %** | 4 % | **6 %** | 38 % |
+| Parakeet v2 (English only) | 71 % | 100 % | 9 % | 105 % |
+| GigaAM v3 (Russian only) | 36 % | 4 % | 53 % | 40 % |
+| splice by alphabet | 20 % | 4 % | 6 % | 40 % |
+| splice where the models disagree | 20 % | 8 % | 6 % | 38 % |
+| **best conceivable selection** | **15 %** | 0 % | 6 % | **31 %** |
+
+### The English specialist is not better at English
+
+Nine per cent against six is three errors against two, out of thirty-three
+words. On a corpus this size that is not a difference. What matters is *which*
+words: both models mangle "Elasticsearch", and they mangle it almost identically
+— "Elastic Sark" against "ElasticSark" — on clean English audio with no Russian
+anywhere near it.
+
+That single observation is what decides the whole idea. A specialist is only
+worth its memory if it is better on its own language, and this one is not.
+
+### The ceiling says no rule exists
+
+The last row is the oracle: take the reference word whenever *any* of the three
+produced it. No selection rule, however clever, can beat it. Adding the English
+specialist moves it from 16 % to 15 % overall, and from 33 % to 31 % on the
+mixed sentences that hold all the error. One point, two on mix.
+
+Both concrete rules land above Parakeet alone. Gating on disagreement — using
+the two Russian-capable models as an uncertainty detector, the one thing the
+oracle says an ensemble is good for — holds the mixed sentences at 38 % and
+loses four points on Russian, because Parakeet and GigaAM also disagree on
+Russian words the English model then overwrites with Latin guesses.
+
+### Why cutting the recognised speech out of the audio does not rescue it
+
+The stronger version of the proposal: decode one language, remove what was
+recognised from the waveform, hand the remainder to the other model with less
+room to go wrong. The oracle above does not bound this, and saying so honestly
+matters — a cascade changes what the second model *hears*, so it can produce
+hypotheses that are not in the network at all.
+
+It fails on its premise instead. The second stage would be a specialist that is
+not better on its own language, and "Elasticsearch" is already wrong with zero
+Russian to remove. Cutting away Russian cannot fix an error that happens when no
+Russian is present.
+
+The mechanics are also weaker than they sound. A recogniser returns text and
+timings, not the waveform of the words it heard, so "remove what was recognised"
+can only mean blanking time spans. That needs word-level timestamps *and* a
+decision about which spans are foreign — and that decision is the disagreement
+detector, measured at 38 % on the mixed sentences. It does not find them.
+
+### Latin hotwords fail the same way Russian ones did
+
+Biasing was falsified earlier on a Russian word. The failing terms here are
+Latin, and Latin tokens certainly exist in the vocabulary, so it was worth one
+more run — on `06-mix.wav`, biasing towards Kibana, Elasticsearch, consumer, lag:
+
+| score | output |
+|------:|---|
+| none | …там **консумер Лэк** вырос, и **Лэстиксок** начал отдавать 429. |
+| 1.5, 3, 6 | unchanged |
+| 12 | …там консумер **laglag** вырос, и **ElagSlag** начал отдавать 429. |
+| 30 | Мы посмотрели В**laglaglaglaglaglag**… |
+
+No window, exactly as before. The script was never the problem.
+
+### What the errors actually are
+
+Kibana, Kafka, Elasticsearch, consumer lag, shard allocation, rebalance, thread
+pool, consumer offsets topic. A closed set of named entities, mangled the same
+way by every model tested, in the same places.
+
+That is not a language-selection failure, and three experiments aimed at
+language selection — routing, voting, splicing — have now each been stopped by
+the same wall. It is a vocabulary failure, and a word-level decision made
+without the sentence around it cannot fix it: "полка" and "Kafka" are the same
+distance apart as the repairs that work. The context that separates them exists
+only in the finished transcript.
