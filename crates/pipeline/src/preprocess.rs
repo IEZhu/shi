@@ -30,12 +30,20 @@ pub const TARGET_RMS: f32 = 0.08;
 /// Without it a pause between words becomes a wall of hiss: the quieter the
 /// input, the more eagerly the gain would climb.
 ///
-/// Forty decibels is set from the first real recording rather than from taste.
-/// Its microphone stream ran at an RMS between 0.001 and 0.009 depending on the
-/// minute, and reaching the target from the quiet end of that needs 38 dB. A
-/// lower ceiling would leave exactly the audio this exists for still too quiet;
-/// a higher one starts lifting rooms rather than voices.
-pub const MAX_GAIN_DB: f32 = 40.0;
+/// Twenty decibels, and the first number here was wrong in an instructive way.
+///
+/// It was set to forty from the per-minute RMS of the first real recording,
+/// which ran between 0.001 and 0.009. But those minutes were mostly silence:
+/// measured per *utterance*, the two moments that speaker actually spoke sat at
+/// 0.10 and 0.16 — above the target, needing no gain at all. Everything else
+/// was breath and room at 0.00006 to 0.008, and forty decibels lifted it far
+/// enough for the recogniser to write "Thank you." and "I'm just gonna be able
+/// to do" over it. Thirteen invented lines, no recovered ones.
+///
+/// Twenty still rescues genuinely faint speech — an utterance at 0.008 reaches
+/// the target — while leaving noise at 0.0001 twenty times below anything a
+/// recogniser will hallucinate from.
+pub const MAX_GAIN_DB: f32 = 20.0;
 
 /// Highest sample allowed after gain, leaving headroom rather than clipping.
 const CEILING: f32 = 0.97;
@@ -69,12 +77,20 @@ pub fn rms(samples: &[f32]) -> f32 {
 /// Returns 1.0 when the audio is already right, or when it is so quiet that
 /// lifting it would only amplify the room.
 pub fn normalize(samples: &mut [f32]) -> f32 {
+    normalize_within(samples, MAX_GAIN_DB)
+}
+
+/// Normalise, but never amplify by more than `max_gain_db`.
+///
+/// The ceiling is the whole safety mechanism, so it is a parameter that can be
+/// measured rather than a constant that has to be believed.
+pub fn normalize_within(samples: &mut [f32], max_gain_db: f32) -> f32 {
     let level = rms(samples);
     if level <= f32::EPSILON {
         return 1.0;
     }
 
-    let ceiling_gain = 10f32.powf(MAX_GAIN_DB / 20.0);
+    let ceiling_gain = 10f32.powf(max_gain_db / 20.0);
     let mut gain = (TARGET_RMS / level).min(ceiling_gain);
 
     // Never let the loudest sample clip: a transient that survives the gain is
@@ -145,10 +161,26 @@ pub struct Settings {
 }
 
 impl Default for Settings {
+    /// Levelling is off.
+    ///
+    /// It is a large win on genuinely faint speech — 43 % word error against
+    /// 24 % on a corpus scaled down to a fortieth of normal — and a net loss on
+    /// the first real meeting recorded here, where the quiet stretches were
+    /// silence rather than faint speech. Levelled, the recogniser wrote
+    /// "Thank you." and "I'm just gonna be able to do" over breath it had
+    /// previously returned nothing for: thirteen invented lines, no recovered
+    /// ones. Lowering the gain ceiling did not help — twenty decibels produced
+    /// twenty-five such lines where forty produced twenty-three — because the
+    /// ceiling is not the mechanism. The voice-activity detector hands over
+    /// segments that hold no speech, and an empty transcript was the only thing
+    /// catching them.
+    ///
+    /// So it is available and off, until there is a way to tell a faint talker
+    /// from a quiet room.
     fn default() -> Self {
         Self {
             remove_dc: true,
-            normalize: true,
+            normalize: false,
             denoise: false,
         }
     }
@@ -169,10 +201,24 @@ mod tests {
     }
 
     #[test]
+    fn room_noise_is_not_lifted_into_speech_range() {
+        // Measured from a real meeting: between utterances the microphone sat
+        // here, and a ceiling generous enough to reach the target from this
+        // level is a ceiling that invents words out of breath.
+        let mut room = tone(1.0, 0.0001);
+        normalize(&mut room);
+        assert!(
+            rms(&room) < TARGET_RMS / 4.0,
+            "room noise reached {:.4}, close enough to speech to be transcribed",
+            rms(&room)
+        );
+    }
+
+    #[test]
     fn a_quiet_utterance_is_brought_up_to_level() {
         // The first real recording sat here: an RMS of about a thousandth of
         // full scale.
-        let mut quiet = tone(1.0, 0.0015);
+        let mut quiet = tone(1.0, 0.012);
         let gain = normalize(&mut quiet);
         assert!(gain > 1.0, "quiet audio was left alone");
         assert!(gain < 10f32.powf(MAX_GAIN_DB / 20.0), "this case should not need the cap");

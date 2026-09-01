@@ -409,57 +409,59 @@ an integration.
 
 ## Levelling the audio before the recogniser sees it
 
-The first real recording made with this application had a microphone stream
-sitting between 0.001 and 0.009 RMS — forty decibels below what a recogniser is
-trained on. That is worth fixing before reaching for a better model.
+`preprocess.rs` removes any constant offset, and can bring an utterance to
+0.08 RMS with the gain capped and the peak protected from clipping. Levelling
+is **off by default**, and the reason is the more useful half of this section.
 
-`preprocess.rs` does three things, each switchable and each measured on its own:
-remove any constant offset, bring the utterance to 0.08 RMS (about -22 dBFS,
-where broadcast speech sits) with the gain capped and the peak protected from
-clipping, and optionally denoise.
+On a corpus scaled down to imitate a faint talker it is a large win:
 
-Measured with Parakeet on the same corpus at three loudness levels:
-
-| corpus | untouched | levelled | gain |
-|---|---:|---:|---:|
-| telephone band, RMS 0.02 | 21 % | 21 % | none |
-| quiet, RMS 0.002 | 21 % | 19 % | 2 points |
-| very quiet, RMS 0.0005 | **43 %** | **24 %** | **19 points** |
-
-The gain grows as the audio gets quieter and vanishes when it does not need to
-exist, which is what a real effect looks like as opposed to a lucky run. At
-0.0005 RMS the recogniser was losing nearly half its words and levelling brings
-it back to within a few points of the loud version.
-
-Two details are load-bearing:
-
-- **The gain is capped at 40 dB.** Not from taste: reaching the target from the
-  quiet end of that first real recording needs 38 dB. Lower and the audio this
-  exists for stays too quiet; higher and it starts amplifying rooms.
-- **Only the recogniser sees the levelled audio.** The echo detector and the
-  speaker embedder keep the original, because their thresholds were calibrated
-  against what the microphone actually captured.
-
-### The denoiser is off, and stays off
-
-GTCRN, run over the same utterances before decoding:
-
-| | telephone band | quiet |
+| corpus | untouched | levelled |
 |---|---:|---:|
-| levelled | 21 % | 19 % |
-| levelled and denoised | 25 % | 26 % |
+| telephone band, RMS 0.02 | 21 % | 21 % |
+| quiet, RMS 0.002 | 21 % | 19 % |
+| very quiet, RMS 0.0005 | **43 %** | **24 %** |
 
-Four to seven points worse. A denoiser trained to please the ear removes
-exactly the low-energy detail a recogniser leans on. The code stays —
-`denoise_with` attaches one — so that the next model can be measured rather
-than argued about.
+Run against the first real meeting, it made the transcript worse.
+
+### The statistic that misled me
+
+The ceiling was first set to 40 dB from that recording's microphone stream,
+which measured between 0.001 and 0.009 RMS per minute. Those minutes were mostly
+silence. Measured per *utterance* instead, the two moments the speaker actually
+spoke sat at **0.10 and 0.16** — above the target, needing no gain at all.
+Everything else was breath and room between 0.00006 and 0.008.
+
+So the microphone was never quiet. The person was.
+
+Levelled, the recogniser produced thirteen lines it had previously left empty:
+"Thank you." five times, "Yeah.", "I'm just gonna be able to do" — English
+filler in a Russian meeting, which is what a recogniser writes over breath.
+Thirteen invented lines, none recovered.
+
+### Why the gain ceiling is not the control
+
+Lowering it to 20 dB produced **twenty-five** such lines where 40 dB produced
+twenty-three. That rules out amplification as the mechanism.
+
+The voice-activity detector sees the raw audio, so segmentation is identical in
+every run; what changes is how many segments come back with text instead of
+nothing. Those segments hold no speech. An empty transcript was the only thing
+catching them, and levelling takes that away.
+
+Fixing this properly means telling a faint talker from a quiet room before
+deciding whether to apply gain. Until that is measured, the stage stays off,
+`preprocess_with` switches it on, and a test pins that it works when it is.
+
+### The denoiser is off too
+
+GTCRN over the same utterances: 25 % and 26 % against 21 % and 19 % without it.
+A model trained to please the ear removes the low-energy detail a recogniser
+leans on. `denoise_with` attaches one so the next can be measured rather than
+argued about.
 
 ### Why the language is not chosen per utterance
 
-Routing each utterance to the model that handles its language is the obvious
-companion to this, and the numbers say it is not worth building yet. Parakeet
-is best or tied in every category on this corpus except Russian through a
-telephone band, where GigaAM scores 4 % against its 8 %. That is one third of
-the material and a four-point difference, bought with a second model resident in
-memory and a language detector in front of it. The measurement is here if the
-balance changes.
+Parakeet is best or tied in every category on this corpus except Russian through
+a telephone band, where GigaAM scores 4 % against its 8 %. That is one third of
+the material and four points, against a second model resident in memory and a
+language detector in front of it. The measurement is here if the balance changes.

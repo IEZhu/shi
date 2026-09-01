@@ -290,6 +290,7 @@ fn a_quiet_talker_reaches_the_recogniser_at_a_usable_level() {
     }
 
     let heard = Arc::new(Levels::default());
+    #[allow(unused_mut)]
     let mut pipeline = StreamPipeline::new(
         StreamKind::Mic,
         16_000,
@@ -298,15 +299,25 @@ fn a_quiet_talker_reaches_the_recogniser_at_a_usable_level() {
         VadSettings::default(),
     )
     .expect("build pipeline");
+    // Levelling is off by default, so this test asks for it explicitly: what is
+    // being pinned is that the stage works when switched on, not that it should
+    // be on.
+    pipeline.preprocess_with(shi_pipeline::PreprocessSettings {
+        normalize: true,
+        ..Default::default()
+    });
 
-    let faint: Vec<f32> = fixture().iter().map(|s| s * 0.01).collect();
+    // A tenth of normal: within reach of the twenty-decibel ceiling, which is
+    // the point — a hundredth deliberately is not, and the ceiling is what
+    // stops a quiet room being lifted into speech range.
+    let faint: Vec<f32> = fixture().iter().map(|s| s * 0.1).collect();
     drive(&mut pipeline, &faint);
 
     let levels = heard.0.lock().unwrap();
     assert!(!levels.is_empty(), "nothing was decoded");
     for level in levels.iter() {
         assert!(
-            *level > 0.02,
+            *level > 0.04,
             "an utterance reached the recogniser at {level:.4}, far below what a \
              model expects; levelling did not happen"
         );
