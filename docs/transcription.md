@@ -630,3 +630,121 @@ corrects things.
 `hits` is stored per rule and shown in the dictionary panel for that reason. A
 rule that has never fired is a rule that was taught on a form the recogniser has
 not produced since, and the user can drop it.
+
+## A voice gate in front of the recogniser
+
+Over the first real meeting the voice-activity detector opened **277 segments
+on the microphone — 49.4 of 68 minutes — for a person who spoke three times.**
+The system stream, which carried the conversation, gave 196 segments and
+61.9 minutes. What filled the microphone segments was breath and room tone, and
+the only thing keeping it out of the transcript was that the recogniser usually
+returned nothing for it. Levelling showed how thin that protection was.
+
+Loudness could not be the test — a faint talker sits where a quiet room sits —
+so the gate asks whether anything in the segment repeats itself the way a voice
+does: normalised autocorrelation at lags between 70 and 400 Hz, which is the
+same for a voice recorded faintly as for one recorded loudly. `speech.rs`.
+
+### A run, not a share
+
+The first design scored the *share* of voiced frames and set the bar at 0.05.
+Measured stand-alone it looked safe: the least periodic of 165 real remote
+turns scored 0.247, the microphone's three real turns 0.221–0.568, and segments
+that produced text out of nothing 0.000–0.006. The share is diluted by whatever
+silence the segment contains, though, and a detector segment is mostly silence
+by nature. So the gate measures the **longest unbroken stretch of voicing**
+instead:
+
+| | shortest run inside real speech | median run |
+|---|---:|---:|
+| 165 remote turns | **190 ms** | 800 ms |
+| 3 microphone turns | 420 ms | 470 ms |
+| segments that produced text out of nothing | — | 80 ms |
+| silent segments | — | 50 ms |
+
+The bar is **100 ms**: half the shortest real turn seen, still removing three
+quarters of the silent segments. The margin is on the side of keeping speech.
+
+### Measured through the pipeline, over the whole meeting
+
+| | segments rejected | decoding avoided | words lost |
+|---|---:|---:|---|
+| microphone | 195 | **31.4 of 49.4 min** | 8, all filler — "mm", "yeah", "okay", "thank you" |
+| system | 9 | 0.2 min | 5 — "Oh", "Next.", "S.", "Thank you." |
+
+Every one of the nine system segments was checked against what the ungated run
+had heard at that moment: those four fragments and six empties. The three real
+microphone turns and all 7 115 words of the remote side came through — 7 110
+after the five above. The A/B was run twice with the identical binary and is
+byte-for-byte reproducible.
+
+### The measurement that said otherwise, and was wrong
+
+An earlier comparison reported the gate dropping 103 and then 344 real words
+from the system stream, which nearly killed it. That number came from a script
+that read only the first line of each Markdown block. Blocks hold one utterance
+per line, and the gate changes speaker labels downstream — a rejected segment
+alters the tracker's state — so the *block count* fell from 136 to 119 and the
+script counted fewer first lines. Counting every line: 7 115 against 7 110.
+
+Two lessons, both already learned once and now learned again:
+
+- **count the whole file**, not the shape of it;
+- **the stand-alone number was right** and the pipeline number was an artefact,
+  which is the opposite of what happened with levelling — so neither "trust the
+  harness" nor "trust the pipeline" is a rule; check the measurement itself.
+
+### The detector's threshold is not the lever
+
+Silero's threshold had never been swept on real audio; 0.5 came from the plan.
+
+| threshold | microphone | system |
+|---:|---|---|
+| 0.5 | 277 segments, 49.4 min | 196, 61.9 min |
+| 0.6 | 287, 45.4 min | 196, 61.7 min |
+| 0.7 | 293, 40.3 min | 201, 61.5 min |
+| 0.8 | 294, 33.1 min | 206, 61.2 min |
+
+Raising it *splits* the noise segments rather than removing them: the count
+goes up while the minutes go down. Silero scores this room above 0.8. The gate
+stays.
+
+Fed the same four seconds of that room on their own, Silero opens **no segment
+at all**; it opened one only with an hour of meeting behind it. That is why no
+fixture ever caught the problem, and why `fixtures/room-tone-mic.wav` is tested
+against the gate directly rather than through the detector.
+
+### The detector's version, on the other hand
+
+`models/silero_vad.onnx` — the 2025-07 export, 644 KB — segments the meeting
+exactly as `silero_vad_v4.onnx` does: 277 and 196 segments, to the second.
+**Silero v5** is a different animal:
+
+| model | microphone | system |
+|---|---|---|
+| current (= v4) | 277 segments, 49.4 min | 196, 61.9 min |
+| **v5** | **6 segments, 0.3 min** | 162, 62.7 min |
+
+Six microphone segments: two empties, one "Yeah.", the first and third real
+turns intact — and the second real turn **cut from 3.8 s to 1.8 s** and
+returned as "But the light." One of three real turns damaged is exactly the
+failure the gate was designed never to commit, so v5 is not the default. It is
+in `models/` as an instrument; the pipeline comparison follows below.
+
+### v5 through the pipeline: a latent abort, not a comparison
+
+The pipeline pass with v5 never finished. At the fiftieth minute the detector
+had one speech segment open for over two minutes — sherpa reports its circular
+buffer overflowing at 1 920 000 samples and grows it — and then handed that
+segment to the recogniser, whose encoder cannot take an input that long. ONNX
+Runtime threw (`Attempting to broadcast an axis by a dimension other than 1.
+12288 by 14321`) and the process aborted, because a C++ exception crossing into
+Rust cannot be caught. `max_speech_duration` was set to 20 s throughout and did
+not close the segment; the 22–29 s segments seen earlier with v4 were the same
+thing on a smaller scale.
+
+So this is not only about v5. **Any segment the detector fails to close will
+crash the app mid-meeting**, and the shipped detector merely has not produced
+one yet on the recordings tried. The recogniser must never be handed more than
+it can take, whatever the detector does; that guard belongs in the pipeline,
+and until it exists v5 cannot even be measured here.

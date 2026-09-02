@@ -10,6 +10,7 @@ pub mod cadence;
 pub mod diarize;
 pub mod echo;
 pub mod preprocess;
+pub mod speech;
 pub mod engine;
 pub mod error;
 pub mod event;
@@ -26,5 +27,6 @@ pub use diarize::{
 pub use echo::{DEFAULT_ECHO_THRESHOLD, EchoReference};
 pub use preprocess::{Denoiser, Settings as PreprocessSettings};
 pub use engine::{AudioTap, StreamPipeline, VadSettings};
+pub use speech::{MIN_VOICED_MS, SHORTEST_JUDGED, holds_speech, holds_speech_beyond, voiced_run_ms};
 pub use event::PipelineEvent;
 pub use error::{PipelineError, Result};

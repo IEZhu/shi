@@ -13,6 +13,7 @@ use crate::echo::EchoReference;
 use crate::preprocess::{self, Settings as PreprocessSettings};
 use crate::error::{PipelineError, Result};
 use crate::event::PipelineEvent;
+use crate::speech;
 
 /// Seconds of audio the VAD may buffer internally.
 const VAD_BUFFER_SECONDS: f32 = 30.0;
@@ -65,6 +66,10 @@ pub struct VadSettings {
     pub min_silence: Duration,
     pub min_speech: Duration,
     pub max_speech: Duration,
+    /// Unbroken voicing a segment must contain to be worth a decode. Zero lets
+    /// everything through, which is what the measurement in
+    /// `docs/transcription.md` compares against.
+    pub min_voiced_ms: u32,
 }
 
 impl Default for VadSettings {
@@ -77,6 +82,7 @@ impl Default for VadSettings {
             // Below this it is a cough or a click, not a turn.
             min_speech: Duration::from_millis(250),
             max_speech: Duration::from_secs(20),
+            min_voiced_ms: speech::MIN_VOICED_MS,
         }
     }
 }
@@ -113,6 +119,8 @@ pub struct StreamPipeline {
     draft_showing: bool,
     echo: EchoRole,
     suppressed: u64,
+    voiceless: u64,
+    min_voiced_ms: u32,
     preprocess: PreprocessSettings,
     denoiser: Option<crate::preprocess::Denoiser>,
     /// Present only on the stream that carries several people.
@@ -170,6 +178,8 @@ impl StreamPipeline {
             draft_showing: false,
             echo: EchoRole::default(),
             suppressed: 0,
+            voiceless: 0,
+            min_voiced_ms: settings.min_voiced_ms,
             preprocess: PreprocessSettings::default(),
             denoiser: None,
             speakers: None,
@@ -258,6 +268,12 @@ impl StreamPipeline {
     /// instead of wondering why they are missing from their own transcript.
     pub fn suppressed_echo(&self) -> u64 {
         self.suppressed
+    }
+
+    /// Segments the detector opened that held no voice, and so were never
+    /// decoded. Useful for telling a quiet meeting from a broken microphone.
+    pub fn voiceless_segments(&self) -> u64 {
+        self.voiceless
     }
 
     /// The audio as the recogniser should hear it.
@@ -441,6 +457,40 @@ impl StreamPipeline {
                     at = ?start,
                     total = self.suppressed,
                     "discarded an utterance as speaker echo"
+                );
+                self.discard_through(start_sample + length as u64);
+                if self.draft_showing {
+                    self.draft_showing = false;
+                    events.push(PipelineEvent::DraftAbandoned {
+                        stream: self.stream,
+                    });
+                }
+                continue;
+            }
+
+            // The detector finds where the signal is not silence, which over a
+            // real meeting is most of it: 277 microphone segments for three
+            // spoken turns. Asking whether anything in here repeats itself the
+            // way a voice does costs a fraction of a decode, removed 195 of
+            // those segments — 31 of 49 minutes of decoding — and dropped no
+            // word of the 165 remote turns it was measured against.
+            if !speech::holds_speech_beyond(
+                &samples,
+                ASR_SAMPLE_RATE as u32,
+                self.min_voiced_ms,
+            ) {
+                self.voiceless += 1;
+                // The run is measured again in full for the log, because the
+                // number that decided a rejection is worth more than the few
+                // milliseconds it costs: a real meeting rejected 195 segments
+                // and was diagnosed from exactly these lines.
+                tracing::debug!(
+                    stream = %self.stream,
+                    at = ?start,
+                    length_ms = end.saturating_sub(start).as_millis() as u64,
+                    voiced_run_ms = speech::voiced_run_ms(&samples, ASR_SAMPLE_RATE as u32, u32::MAX),
+                    total = self.voiceless,
+                    "discarded an utterance that holds no voice"
                 );
                 self.discard_through(start_sample + length as u64);
                 if self.draft_showing {

@@ -181,6 +181,16 @@ fn regroup_speakers(
 }
 
 fn main() {
+    // Every segment the voice gate rejects is logged at info level with the
+    // numbers that decided it. Without a subscriber those lines go nowhere,
+    // which is how a probe once ran for ten minutes and reported nothing.
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_target(false)
+        .without_time()
+        .with_writer(std::io::stderr)
+        .init();
+
     let mut args = std::env::args().skip(1);
     let base = args.next().expect("usage: transcribe_recording <base> <out.md>");
     let out = args.next().unwrap_or_else(|| "meeting.md".into());
@@ -199,10 +209,26 @@ fn main() {
         )
         .expect("load recogniser"),
     );
-    let silero = format!("{root}/models/silero_vad.onnx");
+    // SHI_SILERO points at another voice-activity model. The 2025-07 export in
+    // `models/` behaves exactly like Silero v4; v5 opened six microphone
+    // segments where v4 opened 277 over the same meeting, and the comparison
+    // has to run through this pipeline rather than a stand-in.
+    let silero = std::env::var("SHI_SILERO")
+        .unwrap_or_else(|_| format!("{root}/models/silero_vad.onnx"));
+    eprintln!("voice activity model: {silero}");
+
+    // SHI_MIN_VOICED_MS=0 turns the voice gate off, which is how the before and
+    // after in docs/transcription.md were measured against each other.
+    let mut vad = VadSettings::default();
+    if let Ok(value) = std::env::var("SHI_MIN_VOICED_MS")
+        && let Ok(parsed) = value.parse::<u32>()
+    {
+        eprintln!("voice gate at {parsed} ms");
+        vad.min_voiced_ms = parsed;
+    }
 
     let build = |kind: StreamKind, rate: u32| {
-        StreamPipeline::new(kind, rate, &silero, Arc::clone(&transcriber), VadSettings::default())
+        StreamPipeline::new(kind, rate, &silero, Arc::clone(&transcriber), vad)
             .expect("build pipeline")
     };
     let mut system = build(StreamKind::System, sys_raw.rate);
