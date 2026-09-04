@@ -830,3 +830,26 @@ by energy at the quietest moment available, which is what the cap does, and
 the same 71-minute meeting decoded with `longest_decode` at 10 s instead of 30
 (`SHI_LONGEST_DECODE_MS=10000` on `transcribe_recording`) — and, since it has no
 reference transcript, a person who was there reading the two side by side.
+
+### Ten seconds, on the meeting
+
+`SHI_LONGEST_DECODE_MS=10000` over the same recording: **488 finals instead of
+246**, median 8.7 s, none over 10 s. The remote side came back with 7 357 words
+against 7 199 — 574 gone, 732 new — which is the direction the corpus predicts,
+since a long decode loses words rather than inventing them. The microphone was
+untouched at 51.
+
+One passage read side by side shows both effects at once. The shorter version
+keeps the fillers the speaker actually said ("да", "как бы") that the long
+decode had smoothed away, and it mangles the one phrase the cut landed inside:
+"было принято решение посмотреть в эту сторону" became "было пришел посмотреть
+в сторону". The quietest 20 ms in a two-second window is not always a pause.
+Which effect outweighs which is a judgement for someone who was in the room;
+both transcripts sit in `target/dev-bundles/` as `v4guard.md` and `cap10.md`.
+
+What is not a judgement: at the shipped session threshold of 0.70, twice as
+many utterances turned into **108 speakers** after offline clustering instead of
+58. Decode length and the diarization threshold are coupled — shorter pieces
+give the tracker less voice per decision — so the threshold has to move to the
+measured 0.45–0.50 before a shorter decode can be shipped, whatever the reader
+decides.
