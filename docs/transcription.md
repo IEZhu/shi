@@ -748,3 +748,85 @@ crash the app mid-meeting**, and the shipped detector merely has not produced
 one yet on the recordings tried. The recogniser must never be handed more than
 it can take, whatever the detector does; that guard belongs in the pipeline,
 and until it exists v5 cannot even be measured here.
+
+### The recogniser is now capped — and the cap turns out to fire
+
+`split_utterance` in `engine.rs` hands the recogniser nothing longer than
+`VadSettings::longest_decode` — 30 s by default. A longer utterance is cut at
+the quietest 20 ms in the two seconds before the limit, so a pause is preferred
+to the middle of a word, and each piece is judged, decoded and attributed on its
+own. `the_recogniser_is_never_handed_more_than_it_can_take` pins it through the
+real detector with a small cap.
+
+It was meant as a safety net that never fires with the shipped detector, and
+that was wrong. The 29 s overshoot quoted above was the *microphone*; the
+system stream of the same meeting holds segments up to **74 s**, forty-five of
+them past 30 s, and `max_speech` at 20 s stops none of them. Over the meeting
+the cap cut about 46 times, and **98 of the 230 finals were longer than
+20 s**. The transcript changed by some 300 words either way (7 115 → 7 199, a
+net gain), which is not the boundary effect one would expect from 46 cuts. The
+section after the next explains why.
+
+Natural pauses do not solve this. Lowering the detector's `min_silence` moves
+the median utterance but leaves the tail exactly where it was:
+
+| `min_silence` | system: median | > 20 s | > 30 s | longest |
+|---:|---:|---:|---:|---:|
+| 500 ms | 14.3 s | 84 | 45 | 74.2 s |
+| 300 ms | 10.0 s | 81 | 43 | 74.2 s |
+| 200 ms | 9.1 s | 74 | 39 | 74.2 s |
+| 120 ms | 7.2 s | 69 | 38 | 74.2 s |
+
+A fluent speaker on a call does not leave a 120 ms gap the detector notices, so
+the long stretches can only be cut by the pipeline — which is what the cap does,
+and why its length is a setting.
+
+### v5 through the guarded pipeline
+
+With the cap in place v5 runs to the end: 216 finals, buffer overflow warnings
+but no abort, the remote side at 7 252 words against v4's 7 199 with the same
+churn of a few hundred words either way. The microphone tells the same story
+as the stand-alone run: eleven filler lines become two, the first and third
+real turns survive, and the second is still cut to 1.8 s and returned as
+"But the light." — at thresholds 0.5, 0.4 and 0.3 alike, so it is not the
+threshold. Two suppressed echoes become none, because v5 never opened on them.
+
+One damaged turn in three is the failure this whole section exists to avoid,
+and the voice gate now removes the microphone noise without touching a word, so
+v4 stays. v5 remains in `models/` for the day a recording contradicts this.
+
+### The length of an utterance is the largest lever found so far
+
+The churn from 46 cuts was too large to be a boundary effect, so the effect of
+piece length was measured directly. The ten reference sentences of
+`fixtures/mixed-ru-en` were concatenated with 300 ms gaps into 43 s of speech,
+in four different orders so that where the cuts fall averages out, and decoded
+whole, in halves, in quarters — every cut in a gap — and sentence by sentence.
+About 400 reference words per cell:
+
+| | one piece, ~43 s | two, ~22 s | four, ~11 s | sentence by sentence, ~4 s |
+|---|---:|---:|---:|---:|
+| clean | 32 % | 33 % | 29 % | **18 %** |
+| telephone band | 46 % | 40 % | 36 % | **22 %** |
+
+The same audio, the same model. **Decoding it in long stretches roughly
+doubles the error rate.** Even eleven-second pieces sit ten points above
+single sentences. The whole-piece decode of the clean set dropped "lost its
+leader partition" from the middle of an English sentence it decodes perfectly on
+its own. A single cut placed deliberately mid-word at 12 s still scored better
+than no cut at all (26 % and 42 % against 27 % and 49 %), so the damage a cut
+does is smaller than the damage length does.
+
+Nothing about the model was changed in any of the six experiments that tried to
+replace it, and the largest single number in this document was sitting in the
+detector's `min_silence`: at 500 ms a fluent speaker is never interrupted, so
+the recogniser is fed twenty- and thirty-second stretches it demonstrably
+cannot handle. On the real meeting 98 of 230 finals were over 20 s.
+
+What this does not settle is how short. The corpus was cut in gaps that exist
+because the sentences were recorded separately; a real monologue has to be cut
+by energy at the quietest moment available, which is what the cap does, and
+`min_silence` has just been shown not to help. The measurement that decides is
+the same 71-minute meeting decoded with `longest_decode` at 10 s instead of 30
+(`SHI_LONGEST_DECODE_MS=10000` on `transcribe_recording`) — and, since it has no
+reference transcript, a person who was there reading the two side by side.

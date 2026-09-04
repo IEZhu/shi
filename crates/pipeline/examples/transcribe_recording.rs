@@ -226,6 +226,15 @@ fn main() {
         eprintln!("voice gate at {parsed} ms");
         vad.min_voiced_ms = parsed;
     }
+    // SHI_LONGEST_DECODE_MS caps what one decode may cover. The corpus says
+    // shorter is more accurate; the meeting has no reference, so the two
+    // transcripts are for a person who was there to compare.
+    if let Ok(value) = std::env::var("SHI_LONGEST_DECODE_MS")
+        && let Ok(parsed) = value.parse::<u64>()
+    {
+        eprintln!("longest decode {parsed} ms");
+        vad.longest_decode = Duration::from_millis(parsed);
+    }
 
     let build = |kind: StreamKind, rate: u32| {
         StreamPipeline::new(kind, rate, &silero, Arc::clone(&transcriber), vad)

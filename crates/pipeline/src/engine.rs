@@ -70,6 +70,14 @@ pub struct VadSettings {
     /// everything through, which is what the measurement in
     /// `docs/transcription.md` compares against.
     pub min_voiced_ms: u32,
+    /// Most audio the recogniser is handed at once; a longer utterance is cut
+    /// at a quiet moment. The detector does not reliably close utterances at
+    /// `max_speech`: on one meeting it ran to 29 s on the microphone and 74 s
+    /// on the system stream, and a two-minute segment aborted the process
+    /// inside the encoder. Thirty seconds has always decoded. The same
+    /// document measures that shorter pieces are decoded *better*, which is
+    /// why this is a setting rather than a constant.
+    pub longest_decode: Duration,
 }
 
 impl Default for VadSettings {
@@ -83,6 +91,7 @@ impl Default for VadSettings {
             min_speech: Duration::from_millis(250),
             max_speech: Duration::from_secs(20),
             min_voiced_ms: speech::MIN_VOICED_MS,
+            longest_decode: Duration::from_secs(30),
         }
     }
 }
@@ -121,6 +130,8 @@ pub struct StreamPipeline {
     suppressed: u64,
     voiceless: u64,
     min_voiced_ms: u32,
+    /// Most samples the recogniser is ever handed at once.
+    longest_decode: usize,
     preprocess: PreprocessSettings,
     denoiser: Option<crate::preprocess::Denoiser>,
     /// Present only on the stream that carries several people.
@@ -180,6 +191,7 @@ impl StreamPipeline {
             suppressed: 0,
             voiceless: 0,
             min_voiced_ms: settings.min_voiced_ms,
+            longest_decode: duration_to_samples(settings.longest_decode),
             preprocess: PreprocessSettings::default(),
             denoiser: None,
             speakers: None,
@@ -439,123 +451,133 @@ impl StreamPipeline {
         let mut events = Vec::new();
 
         while let Some(segment) = self.vad.front() {
-            let start_sample = segment.start().max(0) as u64;
-            let length = segment.n().max(0) as usize;
-            let samples = segment.samples().to_vec();
+            let segment_start = segment.start().max(0) as u64;
+            let whole = segment.samples().to_vec();
             self.vad.pop();
             drop(segment);
 
-            let start = samples_to_duration(start_sample);
-            let end = samples_to_duration(start_sample + length as u64);
+            // The detector is asked to close an utterance at `max_speech` and
+            // does not oblige: 74 s on one meeting's system stream, and over
+            // two minutes with another detector model — more than the
+            // recogniser's encoder can take, and the exception it throws ends
+            // the process. Nothing longer than `longest_decode` reaches it,
+            // whatever the detector does.
+            for (start_sample, samples) in
+                split_utterance(segment_start, whole, self.longest_decode)
+            {
+                let length = samples.len();
+                let start = samples_to_duration(start_sample);
+                let end = samples_to_duration(start_sample + length as u64);
 
-            // Check before decoding: an echo costs nothing to discard and a
-            // decode is the most expensive thing this loop does.
-            if self.is_echo(&samples, start) {
-                self.suppressed += 1;
-                tracing::debug!(
-                    stream = %self.stream,
-                    at = ?start,
-                    total = self.suppressed,
-                    "discarded an utterance as speaker echo"
-                );
-                self.discard_through(start_sample + length as u64);
-                if self.draft_showing {
-                    self.draft_showing = false;
-                    events.push(PipelineEvent::DraftAbandoned {
-                        stream: self.stream,
-                    });
-                }
-                continue;
-            }
-
-            // The detector finds where the signal is not silence, which over a
-            // real meeting is most of it: 277 microphone segments for three
-            // spoken turns. Asking whether anything in here repeats itself the
-            // way a voice does costs a fraction of a decode, removed 195 of
-            // those segments — 31 of 49 minutes of decoding — and dropped no
-            // word of the 165 remote turns it was measured against.
-            if !speech::holds_speech_beyond(
-                &samples,
-                ASR_SAMPLE_RATE as u32,
-                self.min_voiced_ms,
-            ) {
-                self.voiceless += 1;
-                // The run is measured again in full for the log, because the
-                // number that decided a rejection is worth more than the few
-                // milliseconds it costs: a real meeting rejected 195 segments
-                // and was diagnosed from exactly these lines.
-                tracing::debug!(
-                    stream = %self.stream,
-                    at = ?start,
-                    length_ms = end.saturating_sub(start).as_millis() as u64,
-                    voiced_run_ms = speech::voiced_run_ms(&samples, ASR_SAMPLE_RATE as u32, u32::MAX),
-                    total = self.voiceless,
-                    "discarded an utterance that holds no voice"
-                );
-                self.discard_through(start_sample + length as u64);
-                if self.draft_showing {
-                    self.draft_showing = false;
-                    events.push(PipelineEvent::DraftAbandoned {
-                        stream: self.stream,
-                    });
-                }
-                continue;
-            }
-
-            let began = Instant::now();
-            let prepared = self.for_recognition(&samples);
-            let transcript = match self.transcriber.transcribe(&prepared) {
-                Ok(t) => t,
-                Err(err) => {
-                    tracing::warn!(stream = %self.stream, "final decode failed: {err}");
+                // Check before decoding: an echo costs nothing to discard and a
+                // decode is the most expensive thing this loop does.
+                if self.is_echo(&samples, start) {
+                    self.suppressed += 1;
+                    tracing::debug!(
+                        stream = %self.stream,
+                        at = ?start,
+                        total = self.suppressed,
+                        "discarded an utterance as speaker echo"
+                    );
+                    self.discard_through(start_sample + length as u64);
+                    if self.draft_showing {
+                        self.draft_showing = false;
+                        events.push(PipelineEvent::DraftAbandoned {
+                            stream: self.stream,
+                        });
+                    }
                     continue;
                 }
-            };
-            self.cadence.observe(end.saturating_sub(start), began.elapsed());
 
-            // Everything up to the end of this utterance is now accounted for.
-            self.discard_through(start_sample + length as u64);
-
-            if transcript.is_empty() {
-                if self.draft_showing {
-                    self.draft_showing = false;
-                    events.push(PipelineEvent::DraftAbandoned {
-                        stream: self.stream,
-                    });
+                // The detector finds where the signal is not silence, which over a
+                // real meeting is most of it: 277 microphone segments for three
+                // spoken turns. Asking whether anything in here repeats itself the
+                // way a voice does costs a fraction of a decode, removed 195 of
+                // those segments — 31 of 49 minutes of decoding — and dropped no
+                // word of the 165 remote turns it was measured against.
+                if !speech::holds_speech_beyond(
+                    &samples,
+                    ASR_SAMPLE_RATE as u32,
+                    self.min_voiced_ms,
+                ) {
+                    self.voiceless += 1;
+                    // The run is measured again in full for the log, because the
+                    // number that decided a rejection is worth more than the few
+                    // milliseconds it costs: a real meeting rejected 195 segments
+                    // and was diagnosed from exactly these lines.
+                    tracing::debug!(
+                        stream = %self.stream,
+                        at = ?start,
+                        length_ms = end.saturating_sub(start).as_millis() as u64,
+                        voiced_run_ms = speech::voiced_run_ms(&samples, ASR_SAMPLE_RATE as u32, u32::MAX),
+                        total = self.voiceless,
+                        "discarded an utterance that holds no voice"
+                    );
+                    self.discard_through(start_sample + length as u64);
+                    if self.draft_showing {
+                        self.draft_showing = false;
+                        events.push(PipelineEvent::DraftAbandoned {
+                            stream: self.stream,
+                        });
+                    }
+                    continue;
                 }
-                continue;
+
+                let began = Instant::now();
+                let prepared = self.for_recognition(&samples);
+                let transcript = match self.transcriber.transcribe(&prepared) {
+                    Ok(t) => t,
+                    Err(err) => {
+                        tracing::warn!(stream = %self.stream, "final decode failed: {err}");
+                        continue;
+                    }
+                };
+                self.cadence.observe(end.saturating_sub(start), began.elapsed());
+
+                // Everything up to the end of this utterance is now accounted for.
+                self.discard_through(start_sample + length as u64);
+
+                if transcript.is_empty() {
+                    if self.draft_showing {
+                        self.draft_showing = false;
+                        events.push(PipelineEvent::DraftAbandoned {
+                            stream: self.stream,
+                        });
+                    }
+                    continue;
+                }
+
+                let speaker = self
+                    .speakers
+                    .as_mut()
+                    .map(|tracker| tracker.attribute(&samples, end.saturating_sub(start)));
+
+                tracing::debug!(
+                    stream = %self.stream,
+                    at = ?start,
+                    len = ?end.saturating_sub(start),
+                    chars = transcript.text.chars().count(),
+                    ?speaker,
+                    "finalised an utterance"
+                );
+
+                self.draft_showing = false;
+                events.push(PipelineEvent::Final {
+                    stream: self.stream,
+                    start,
+                    end,
+                    // Token offsets arrive relative to the utterance; shift them so
+                    // every timestamp in the transcript shares one origin.
+                    token_offsets: transcript
+                        .token_offsets
+                        .iter()
+                        .map(|offset| start + *offset)
+                        .collect(),
+                    text: transcript.text,
+                    tokens: transcript.tokens,
+                    speaker,
+                });
             }
-
-            let speaker = self
-                .speakers
-                .as_mut()
-                .map(|tracker| tracker.attribute(&samples, end.saturating_sub(start)));
-
-            tracing::debug!(
-                stream = %self.stream,
-                at = ?start,
-                len = ?end.saturating_sub(start),
-                chars = transcript.text.chars().count(),
-                ?speaker,
-                "finalised an utterance"
-            );
-
-            self.draft_showing = false;
-            events.push(PipelineEvent::Final {
-                stream: self.stream,
-                start,
-                end,
-                // Token offsets arrive relative to the utterance; shift them so
-                // every timestamp in the transcript shares one origin.
-                token_offsets: transcript
-                    .token_offsets
-                    .iter()
-                    .map(|offset| start + *offset)
-                    .collect(),
-                text: transcript.text,
-                tokens: transcript.tokens,
-                speaker,
-            });
         }
 
         events
@@ -629,10 +651,109 @@ impl StreamPipeline {
     }
 }
 
+/// How far back from a cut to look for a quiet moment to make it at.
+const CUT_SEARCH: Duration = Duration::from_secs(2);
+
+/// Frame over which loudness is judged when choosing where to cut.
+const CUT_FRAME: usize = 320; // 20 ms
+
+/// Hand back the utterance in pieces no longer than `limit` samples.
+///
+/// Almost always one piece, untouched. A longer utterance is cut at the
+/// quietest moment in the last two seconds before the limit, so a word is
+/// not sliced in half when a pause was available a little earlier.
+fn split_utterance(start: u64, samples: Vec<f32>, limit: usize) -> Vec<(u64, Vec<f32>)> {
+    if samples.len() <= limit || limit == 0 {
+        return vec![(start, samples)];
+    }
+
+    let mut pieces = Vec::new();
+    let mut at = 0usize;
+    while samples.len() - at > limit {
+        let cut = at + quietest_cut(&samples[at..at + limit]);
+        pieces.push((start + at as u64, samples[at..cut].to_vec()));
+        at = cut;
+    }
+    pieces.push((start + at as u64, samples[at..].to_vec()));
+    pieces
+}
+
+/// Offset of the quietest frame in the tail of the window — never earlier than
+/// the tail itself, so every piece keeps most of the window.
+fn quietest_cut(window: &[f32]) -> usize {
+    let tail_from = window.len().saturating_sub(duration_to_samples(CUT_SEARCH));
+    let mut best = window.len();
+    let mut quietest = f32::INFINITY;
+    let mut at = tail_from;
+    while at + CUT_FRAME <= window.len() {
+        let energy: f32 = window[at..at + CUT_FRAME].iter().map(|s| s * s).sum();
+        if energy < quietest {
+            quietest = energy;
+            best = at;
+        }
+        at += CUT_FRAME;
+    }
+    best.max(1)
+}
+
 fn samples_to_duration(samples: u64) -> Duration {
     Duration::from_secs_f64(samples as f64 / ASR_SAMPLE_RATE as f64)
 }
 
 fn duration_to_samples(duration: Duration) -> usize {
     (duration.as_secs_f64() * ASR_SAMPLE_RATE as f64) as usize
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    fn tone_with_a_dip(seconds: f32, dip_at: f32) -> Vec<f32> {
+        (0..(16_000.0 * seconds) as usize)
+            .map(|n| {
+                let t = n as f32 / 16_000.0;
+                let level = if (t - dip_at).abs() < 0.05 { 0.001 } else { 0.3 };
+                level * (t * 220.0 * std::f32::consts::TAU).sin()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_short_utterance_is_handed_back_whole() {
+        let audio = tone_with_a_dip(5.0, 2.5);
+        let pieces = split_utterance(1_000, audio.clone(), 16_000 * 30);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].0, 1_000);
+        assert_eq!(pieces[0].1.len(), audio.len());
+    }
+
+    #[test]
+    fn a_long_utterance_is_cut_at_the_quiet_moment_before_the_limit() {
+        // 100 s of sound with a dip at 29.0 s: the first cut must land in the
+        // dip, not at the 30 s limit where a word might be.
+        let audio = tone_with_a_dip(100.0, 29.0);
+        let limit = 16_000 * 30;
+        let pieces = split_utterance(0, audio, limit);
+
+        assert!(pieces.len() >= 4, "{} pieces", pieces.len());
+        assert!(pieces.iter().all(|(_, p)| p.len() <= limit), "a piece exceeds the limit");
+        let first_cut = pieces[0].1.len() as f32 / 16_000.0;
+        assert!((first_cut - 29.0).abs() < 0.06, "cut at {first_cut} s");
+        // Pieces tile the utterance exactly, in order.
+        let mut expected = 0u64;
+        for (start, piece) in &pieces {
+            assert_eq!(*start, expected);
+            expected += piece.len() as u64;
+        }
+        assert_eq!(expected, 16_000 * 100);
+    }
+
+    #[test]
+    fn without_a_quiet_moment_the_cut_falls_near_the_limit() {
+        let audio = tone_with_a_dip(65.0, -1.0);
+        let limit = 16_000 * 30;
+        let pieces = split_utterance(0, audio, limit);
+        assert!(pieces.iter().all(|(_, p)| p.len() <= limit));
+        assert!(pieces[0].1.len() as f32 / 16_000.0 > 27.9, "the cut stays in the last two seconds");
+    }
 }

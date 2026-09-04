@@ -71,7 +71,11 @@ impl Transcriber for AnyText {
 }
 
 fn build(silero: &str) -> StreamPipeline {
-    StreamPipeline::new(StreamKind::Mic, RATE, silero, Arc::new(AnyText), VadSettings::default())
+    build_with(silero, VadSettings::default())
+}
+
+fn build_with(silero: &str, settings: VadSettings) -> StreamPipeline {
+    StreamPipeline::new(StreamKind::Mic, RATE, silero, Arc::new(AnyText), settings)
         .expect("build pipeline")
 }
 
@@ -150,4 +154,37 @@ fn the_score_does_not_move_when_the_level_does() {
     let a = voiced_run_ms(&loud, RATE, u32::MAX);
     let b = voiced_run_ms(&faint, RATE, u32::MAX);
     assert_eq!(a, b, "loud {a} ms, faint {b} ms");
+}
+
+#[test]
+fn the_recogniser_is_never_handed_more_than_it_can_take() {
+    // The detector is asked to close utterances at `max_speech` and on real
+    // recordings ran to one and a half times that — and, with another detector
+    // model, to over two minutes, which the encoder answered with an exception
+    // that ended the process. Whatever the detector does, no final may exceed
+    // the pipeline's own cap, and the speech inside still has to come out.
+    let Some(silero) = silero() else { return };
+    let settings = VadSettings {
+        longest_decode: Duration::from_millis(1_500),
+        min_voiced_ms: 0,
+        ..VadSettings::default()
+    };
+    let cap = settings.longest_decode + Duration::from_millis(30);
+
+    let mut pipeline = build_with(&silero, settings);
+    let events = drive(&mut pipeline, &fixture());
+
+    let lengths: Vec<Duration> = events
+        .iter()
+        .filter_map(|e| match e {
+            PipelineEvent::Final { start, end, .. } => Some(end.saturating_sub(*start)),
+            _ => None,
+        })
+        .collect();
+    assert!(!lengths.is_empty(), "the speech must still be transcribed");
+    assert!(
+        lengths.iter().all(|l| *l <= cap),
+        "a final exceeded the cap: {lengths:?}"
+    );
+    assert!(lengths.len() >= 2, "a four-second fixture must arrive in pieces at this cap");
 }
