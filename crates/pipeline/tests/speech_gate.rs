@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use shi_audio::StreamKind;
 use shi_pipeline::{
-    PipelineEvent, StreamPipeline, Transcriber, Transcript, VadSettings, holds_speech,
-    voiced_run_ms,
+    PipelineEvent, SpeakerTracker, StreamPipeline, Thresholds, Transcriber, Transcript,
+    VadSettings, holds_speech, voiced_run_ms,
 };
 
 const RATE: u32 = 16_000;
@@ -187,4 +187,49 @@ fn the_recogniser_is_never_handed_more_than_it_can_take() {
         "a final exceeded the cap: {lengths:?}"
     );
     assert!(lengths.len() >= 2, "a four-second fixture must arrive in pieces at this cap");
+}
+
+#[test]
+fn the_pieces_of_one_utterance_belong_to_one_speaker() {
+    // A decode is more accurate the shorter it is and an embedding the longer,
+    // so the recogniser gets five-second pieces while the voice is judged from
+    // the whole utterance. Judging each piece instead turned one real meeting
+    // into a hundred and forty-four speakers.
+    let Some(silero) = silero() else { return };
+    let model = repo_root().join("models/nemo_en_titanet_small.onnx");
+    if !model.is_file() {
+        return;
+    }
+    let Ok(tracker) = SpeakerTracker::new(&model.to_string_lossy(), 2, Thresholds::default())
+    else {
+        return;
+    };
+
+    // A cap far below the fixture's length forces the split.
+    let settings = VadSettings {
+        longest_decode: Duration::from_millis(700),
+        min_voiced_ms: 0,
+        ..VadSettings::default()
+    };
+    let mut pipeline =
+        StreamPipeline::new(StreamKind::System, RATE, &silero, Arc::new(AnyText), settings)
+            .expect("build pipeline");
+    pipeline.identify_speakers(tracker);
+
+    let events = drive(&mut pipeline, &fixture());
+    let speakers: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            PipelineEvent::Final { speaker, .. } => Some(format!("{speaker:?}")),
+            _ => None,
+        })
+        .collect();
+
+    assert!(speakers.len() >= 2, "the fixture must arrive in pieces at this cap");
+    let distinct: std::collections::BTreeSet<&String> = speakers.iter().collect();
+    assert!(
+        distinct.len() <= 2,
+        "one utterance was split across {} verdicts: {speakers:?}",
+        distinct.len()
+    );
 }

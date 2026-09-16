@@ -853,3 +853,80 @@ many utterances turned into **108 speakers** after offline clustering instead of
 give the tracker less voice per decision — so the threshold has to move to the
 measured 0.45–0.50 before a shorter decode can be shipped, whatever the reader
 decides.
+
+## The length of a decode is the setting that mattered
+
+Six experiments tried to replace the model and none of them beat it. The lever
+was never which model but how much audio it is asked to hear at once.
+
+`examples/decode_length` runs the shipped pipeline — the real detector, the real
+`split_utterance` cutting at the quietest moment it can find, which is sometimes
+inside a word — over the reference corpus at several caps. Four sentence orders
+with gaps varying between 200 and 600 ms, so no cap can line up with a rhythm;
+about 400 reference words a cell:
+
+| cap | clean | telephone band |
+|---:|---:|---:|
+| 5 s | **26 %** | **30 %** |
+| 8 s | 26 % | 34 % |
+| 12 s | 38 % | 42 % |
+| 30 s | 38 % | 47 % |
+
+Below five seconds it turns again — three-second pieces score 30 % and 31 % on a
+single order — because the cut lands inside a word too often. The mechanism is
+visible in the word count rather than the error rate: at thirty seconds the
+recogniser returns between 48 and 99 words of a hundred, at five seconds
+between 92 and 103. A long decode does not garble, it **drops**.
+
+`longest_decode` is therefore five seconds.
+
+### What that broke, and what it taught
+
+Five-second pieces made the transcript better and the speaker labelling far
+worse: the same meeting went from 58 speakers to 144 on the online pass.
+
+The recogniser and the voice embedder want opposite things. A decode is more
+accurate the shorter it is; an embedding is more accurate the longer it is.
+Splitting for the recogniser had been splitting for both.
+
+So the two were separated. The speaker is decided once, from the whole
+utterance, and the pieces inherit that one verdict — lazily, so an utterance
+that turns out to be all echo or all room tone never reaches the tracker. The
+offline pass joins the pieces back before embedding: they abut exactly, and the
+join is one-sided so a span that *overlaps* its neighbour is left alone.
+
+| | blocks | remote words | speakers |
+|---|---:|---:|---:|
+| 30 s, fixed 0.70 | 148 | 7 199 | 57 |
+| 5 s, derived threshold | 173 | 7 370 | 39 |
+| **5 s, voice judged whole** | **84** | **7 370** | **17** |
+
+903 pieces rejoin into 185 utterances, against the 184 the old segmentation
+produced — which is the check that the rejoining is reconstructing what was
+split rather than inventing groups.
+
+## A threshold the meeting derives for itself
+
+The session threshold was 0.70, from a synthetic corpus, and a real meeting
+wanted 0.45. Both numbers are right about their own recording, and a fixed one
+cannot serve both: on the calibration corpus the closest pair of *different*
+voices scores 0.662, so a tracker at 0.45 merges two people —
+`the_hardest_pair_is_still_separated` fails the moment it is tried.
+
+What survives both is the shape. Pairwise similarities are bimodal: a crowded
+low mode of different speakers, a smaller high mode of one speaker heard twice.
+`valley_threshold` finds the split between them by Otsu's method, which has no
+constant to tune.
+
+Asked of the real meeting it answered **0.44** on five-second pieces — within a
+hundredth of the 0.45 that had been found by sweeping the threshold by hand —
+and **0.50** once the pieces were rejoined and the embeddings improved. The
+online pass keeps the fixed 0.70, where there is no distribution to look at yet
+and merging two people is the unrecoverable error.
+
+The result reads like the meeting its participant described, "about fourteen of
+us, two or three did nearly all the talking". Words per speaker:
+
+```
+4409, 1374, 645, 525, 180, 70, 63, 47, 27, 10, 5, 5, 4, 2, 2, 1, 1
+```

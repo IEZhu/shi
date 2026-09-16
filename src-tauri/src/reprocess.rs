@@ -62,7 +62,7 @@ pub fn speakers(
         (spans, before)
     };
 
-    let assignments = rediarize(&tracker, &audio, &spans, DEFAULT_SESSION_THRESHOLD);
+    let assignments = rediarize(&tracker, &audio, &spans, None);
     if assignments.is_empty() {
         return Err(AppError::NothingToReprocess);
     }

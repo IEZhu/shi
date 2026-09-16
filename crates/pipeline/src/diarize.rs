@@ -15,8 +15,17 @@ use crate::error::{PipelineError, Result};
 pub const DEFAULT_KNOWN_THRESHOLD: f32 = 0.75;
 
 /// Similarity above which two utterances in one meeting are the same person.
+///
 /// Lower than `known`: splitting one participant into two slots costs a click,
 /// while merging two people loses information.
+///
+/// It stays at 0.70 for the *online* pass even though a real meeting wanted
+/// 0.45, because the two numbers answer different questions. On the calibration
+/// corpus the closest pair of different voices scores 0.662, so a tracker at
+/// 0.45 merges two people — `the_hardest_pair_is_still_separated` proves it.
+/// Through a Bluetooth headset the same-voice scores collapse and 0.70 splits
+/// one person into many. No fixed number satisfies both, so the offline pass
+/// derives its own from the meeting it is looking at: see [`valley_threshold`].
 pub const DEFAULT_SESSION_THRESHOLD: f32 = 0.70;
 
 /// Utterances shorter than this are attributed but never define a voice: a
@@ -485,6 +494,55 @@ mod cluster_tests {
     fn nothing_in_nothing_out() {
         assert!(cluster(&[], 0.7).is_empty());
     }
+
+    /// One voice heard many times, plus a few other people: the two modes the
+    /// derived threshold has to find a valley between.
+    fn two_modes(same: usize, others: usize, jitter: f32) -> Vec<Vec<f32>> {
+        let mut out = around(&[1.0, 0.0, 0.0, 0.0], jitter, same, 1);
+        for person in 0..others {
+            let mut centre = vec![0.0; 4];
+            centre[person % 3 + 1] = 1.0;
+            out.extend(around(&centre, jitter, 3, 2 + person as u64));
+        }
+        out
+    }
+
+    #[test]
+    fn the_valley_lands_between_the_two_modes() {
+        let embeddings = two_modes(8, 4, 0.15);
+        let threshold = valley_threshold(&embeddings).expect("enough utterances");
+
+        let same_low = (0..8)
+            .flat_map(|a| ((a + 1)..8).map(move |b| (a, b)))
+            .map(|(a, b)| cosine(&embeddings[a], &embeddings[b]))
+            .fold(f32::INFINITY, f32::min);
+        let cross_high = (0..8)
+            .flat_map(|a| (8..embeddings.len()).map(move |b| (a, b)))
+            .map(|(a, b)| cosine(&embeddings[a], &embeddings[b]))
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        assert!(cross_high < threshold, "different voices at {cross_high} merge at {threshold}");
+        assert!(threshold <= same_low, "one voice at {same_low} splits at {threshold}");
+    }
+
+    #[test]
+    fn a_meeting_too_small_to_judge_says_so() {
+        // Below the minimum the caller falls back to the fixed threshold
+        // rather than trusting a histogram with almost nothing in it.
+        assert!(valley_threshold(&two_modes(2, 1, 0.1)).is_none());
+        assert!(valley_threshold(&[]).is_none());
+    }
+
+    #[test]
+    fn the_derived_threshold_stays_inside_its_guard_rails() {
+        // One person talking alone has no lower mode at all, so the valley
+        // falls wherever noise puts it; the clamp is what keeps that harmless.
+        let threshold = valley_threshold(&two_modes(20, 0, 0.05)).expect("enough utterances");
+        assert!(
+            (THRESHOLD_FLOOR..=THRESHOLD_CEILING).contains(&threshold),
+            "{threshold} escaped the guard rails"
+        );
+    }
 }
 
 /// One utterance's place in a recording.
@@ -496,37 +554,151 @@ pub struct Span {
     pub end_ms: i64,
 }
 
+
+/// Fewest utterances a meeting needs before its own distribution is worth
+/// trusting. Below this the two modes are not populated enough to have a valley
+/// between them, and the fixed threshold is the better guess.
+const ENOUGH_FOR_A_VALLEY: usize = 12;
+
+/// How far the derived threshold may stray from the fixed one.
+///
+/// Not a tuning knob but a guard against a degenerate meeting: one person
+/// talking to themselves has no "different speakers" mode at all, and the
+/// valley then falls wherever noise puts it. The upper bound is `known`, above
+/// which a session slot would be stricter than recognising a stored profile.
+const THRESHOLD_FLOOR: f32 = 0.30;
+const THRESHOLD_CEILING: f32 = DEFAULT_KNOWN_THRESHOLD;
+
+/// Pick a clustering threshold from the meeting's own similarities.
+///
+/// A fixed number cannot serve both a studio microphone and a Bluetooth
+/// headset. On the calibration corpus the closest different voices score 0.662
+/// and the weakest same-voice pair 0.814, so anything in between works. On a
+/// real call through a headset the same-voice scores collapse toward the
+/// different-voice ones, and 0.70 split a meeting of roughly fourteen people
+/// into fifty-two.
+///
+/// What survives both is the *shape*: pairwise similarities are bimodal, a
+/// crowded low mode of different speakers and a smaller high mode of the same
+/// speaker heard twice. This finds the valley between them by Otsu's method —
+/// the split that best separates the histogram into two groups — which has no
+/// constant to tune and moves with the recording.
+///
+/// Returns `None` when the meeting is too small to say, and the caller should
+/// use [`DEFAULT_SESSION_THRESHOLD`].
+pub fn valley_threshold(embeddings: &[Vec<f32>]) -> Option<f32> {
+    if embeddings.len() < ENOUGH_FOR_A_VALLEY {
+        return None;
+    }
+
+    const BINS: usize = 100;
+    let mut histogram = [0usize; BINS];
+    let mut counted = 0usize;
+    for a in 0..embeddings.len() {
+        for b in (a + 1)..embeddings.len() {
+            let score = cosine(&embeddings[a], &embeddings[b]).clamp(0.0, 1.0);
+            let bin = ((score * BINS as f32) as usize).min(BINS - 1);
+            histogram[bin] += 1;
+            counted += 1;
+        }
+    }
+    if counted == 0 {
+        return None;
+    }
+
+    // Otsu: the cut maximising the variance *between* the two groups is the
+    // one that best explains the histogram as two things rather than one.
+    let total: f64 = counted as f64;
+    let weighted: f64 = histogram.iter().enumerate().map(|(i, n)| i as f64 * *n as f64).sum();
+    let (mut seen, mut seen_weighted) = (0f64, 0f64);
+    let (mut best_bin, mut best_variance) = (0usize, f64::NEG_INFINITY);
+
+    for (bin, count) in histogram.iter().enumerate() {
+        seen += *count as f64;
+        if seen == 0.0 || seen == total {
+            continue;
+        }
+        seen_weighted += bin as f64 * *count as f64;
+        let below = seen_weighted / seen;
+        let above = (weighted - seen_weighted) / (total - seen);
+        let variance = seen * (total - seen) * (below - above) * (below - above);
+        if variance > best_variance {
+            best_variance = variance;
+            best_bin = bin;
+        }
+    }
+
+    // The valley sits at the top of the last bin below the cut.
+    let threshold = (best_bin + 1) as f32 / BINS as f32;
+    Some(threshold.clamp(THRESHOLD_FLOOR, THRESHOLD_CEILING))
+}
+
 /// Re-group a finished meeting's utterances by voice, using the recording.
 ///
 /// Spans too short to carry a voice are skipped rather than guessed at, so they
 /// keep whatever attribution they already had. Slots are numbered from one, to
 /// match what the transcript shows.
+/// `threshold` of `None` asks the meeting itself — see [`valley_threshold`].
 pub fn rediarize(
     tracker: &SpeakerTracker,
     audio: &[f32],
     spans: &[Span],
-    threshold: f32,
+    threshold: Option<f32>,
 ) -> Vec<(i64, u32)> {
+    // Pieces of one utterance are contiguous by construction — the recogniser
+    // is handed short windows, and the cut leaves no gap. Embedding each piece
+    // on its own throws away the very context the embedder needs: the same
+    // meeting gave forty speakers that way and far fewer when the pieces are
+    // joined back first. A real pause between two people is half a second, so
+    // this cannot join two speakers by accident.
+    const CONTIGUOUS_MS: i64 = 30;
+
+    let mut ordered: Vec<&Span> = spans.iter().collect();
+    ordered.sort_by_key(|span| span.start_ms);
+
+    let mut windows: Vec<(Vec<i64>, i64, i64)> = Vec::new();
+    for span in ordered {
+        match windows.last_mut() {
+            Some((ids, _, end)) if (0..=CONTIGUOUS_MS).contains(&(span.start_ms - *end)) => {
+                ids.push(span.id);
+                *end = (*end).max(span.end_ms);
+            }
+            _ => windows.push((vec![span.id], span.start_ms, span.end_ms)),
+        }
+    }
+
     let mut ids = Vec::new();
     let mut embeddings = Vec::new();
 
-    for span in spans {
-        if span.end_ms - span.start_ms < MIN_FOR_EVIDENCE.as_millis() as i64 {
+    for (window_ids, start_ms, end_ms) in windows {
+        if end_ms - start_ms < MIN_FOR_EVIDENCE.as_millis() as i64 {
             continue;
         }
-        let Some(slice) = slice_ms(audio, span.start_ms, span.end_ms) else {
+        let Some(slice) = slice_ms(audio, start_ms, end_ms) else {
             continue;
         };
         if let Some(embedding) = tracker.embed(slice) {
-            ids.push(span.id);
+            ids.push(window_ids);
             embeddings.push(embedding);
         }
     }
 
+    let threshold = threshold
+        .or_else(|| valley_threshold(&embeddings))
+        .unwrap_or(DEFAULT_SESSION_THRESHOLD);
+    tracing::info!(
+        spans = spans.len(),
+        utterances = embeddings.len(),
+        threshold,
+        "re-grouping a meeting by voice"
+    );
+
     cluster(&embeddings, threshold)
         .into_iter()
         .zip(ids)
-        .map(|(label, id)| (id, label as u32 + 1))
+        .flat_map(|(label, window_ids)| {
+            window_ids.into_iter().map(move |id| (id, label as u32 + 1))
+        })
         .collect()
 }
 

@@ -153,7 +153,7 @@ fn regroup_speakers(
     }
 
     let assigned: std::collections::BTreeMap<i64, u32> =
-        rediarize(&tracker, &audio, &spans, DEFAULT_SESSION_THRESHOLD)
+        rediarize(&tracker, &audio, &spans, None)
             .into_iter()
             .collect();
 

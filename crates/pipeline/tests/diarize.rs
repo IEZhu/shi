@@ -223,7 +223,7 @@ fn reprocessing_a_recording_recovers_who_spoke() {
         &tracker,
         &audio,
         &spans,
-        shi_pipeline::DEFAULT_SESSION_THRESHOLD,
+        Some(shi_pipeline::DEFAULT_SESSION_THRESHOLD),
     );
 
     assert_eq!(assignments.len(), 4, "every utterance should be placed");
@@ -257,7 +257,7 @@ fn reprocessing_skips_utterances_too_short_to_place() {
         &tracker,
         &audio,
         &spans,
-        shi_pipeline::DEFAULT_SESSION_THRESHOLD,
+        Some(shi_pipeline::DEFAULT_SESSION_THRESHOLD),
     );
 
     assert!(
@@ -279,7 +279,7 @@ fn a_recording_of_one_person_yields_one_voice() {
         &tracker,
         &audio,
         &spans,
-        shi_pipeline::DEFAULT_SESSION_THRESHOLD,
+        Some(shi_pipeline::DEFAULT_SESSION_THRESHOLD),
     );
 
     let slots: std::collections::HashSet<u32> =

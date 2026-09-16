@@ -8,7 +8,7 @@ use shi_audio::StreamKind;
 
 use crate::asr::{ASR_SAMPLE_RATE, Transcriber};
 use crate::cadence::Cadence;
-use crate::diarize::{LiveNames, SessionSlot, SpeakerTracker};
+use crate::diarize::{Attribution, LiveNames, SessionSlot, SpeakerTracker};
 use crate::echo::EchoReference;
 use crate::preprocess::{self, Settings as PreprocessSettings};
 use crate::error::{PipelineError, Result};
@@ -71,12 +71,15 @@ pub struct VadSettings {
     /// `docs/transcription.md` compares against.
     pub min_voiced_ms: u32,
     /// Most audio the recogniser is handed at once; a longer utterance is cut
-    /// at a quiet moment. The detector does not reliably close utterances at
-    /// `max_speech`: on one meeting it ran to 29 s on the microphone and 74 s
-    /// on the system stream, and a two-minute segment aborted the process
-    /// inside the encoder. Thirty seconds has always decoded. The same
-    /// document measures that shorter pieces are decoded *better*, which is
-    /// why this is a setting rather than a constant.
+    /// at a quiet moment.
+    ///
+    /// This is an accuracy setting first and a safety valve second. Parakeet
+    /// decodes a long stretch markedly worse than a short one — it starts
+    /// dropping words rather than garbling them — and the corpus puts the
+    /// optimum near five seconds, halving the error against thirty. It also
+    /// keeps the detector's failures away from the encoder: `max_speech` is
+    /// not honoured, one meeting produced a 74 s segment and another detector
+    /// a two-minute one, which aborted the process inside ONNX Runtime.
     pub longest_decode: Duration,
 }
 
@@ -91,7 +94,7 @@ impl Default for VadSettings {
             min_speech: Duration::from_millis(250),
             max_speech: Duration::from_secs(20),
             min_voiced_ms: speech::MIN_VOICED_MS,
-            longest_decode: Duration::from_secs(30),
+            longest_decode: Duration::from_secs(5),
         }
     }
 }
@@ -282,6 +285,10 @@ impl StreamPipeline {
         self.suppressed
     }
 
+    fn longest_decode(&self) -> Duration {
+        samples_to_duration(self.longest_decode as u64)
+    }
+
     /// Segments the detector opened that held no voice, and so were never
     /// decoded. Useful for telling a quiet meeting from a broken microphone.
     pub fn voiceless_segments(&self) -> u64 {
@@ -462,8 +469,21 @@ impl StreamPipeline {
             // recogniser's encoder can take, and the exception it throws ends
             // the process. Nothing longer than `longest_decode` reaches it,
             // whatever the detector does.
+            // Who is speaking is decided once, from the whole utterance, and
+            // only when something survives to be attributed.
+            //
+            // The recogniser and the voice embedder want opposite things: a
+            // decode is more accurate the shorter it is, an embedding the
+            // longer it is. Judging each five-second piece separately turned
+            // one meeting into a hundred and forty-four speakers, because each
+            // piece carried a fraction of the voice. Splitting is therefore
+            // the recogniser's business alone, and the pieces inherit one
+            // verdict — computed lazily so a segment that is all echo or all
+            // room tone never reaches the tracker at all.
+            let mut voice: Option<Option<Attribution>> = None;
+
             for (start_sample, samples) in
-                split_utterance(segment_start, whole, self.longest_decode)
+                split_utterance(segment_start, &whole, self.longest_decode)
             {
                 let length = samples.len();
                 let start = samples_to_duration(start_sample);
@@ -547,10 +567,13 @@ impl StreamPipeline {
                     continue;
                 }
 
-                let speaker = self
-                    .speakers
-                    .as_mut()
-                    .map(|tracker| tracker.attribute(&samples, end.saturating_sub(start)));
+                let speaker = voice
+                    .get_or_insert_with(|| {
+                        self.speakers.as_mut().map(|tracker| {
+                            tracker.attribute(&whole, samples_to_duration(whole.len() as u64))
+                        })
+                    })
+                    .clone();
 
                 tracing::debug!(
                     stream = %self.stream,
@@ -597,7 +620,11 @@ impl StreamPipeline {
 
         // Decode only the affordable tail. Whatever precedes it has either been
         // finalised already or will be when the utterance closes.
-        let window_samples = duration_to_samples(self.cadence.max_window());
+        // Capped the same way a final is: the cadence controller decides what
+        // the machine can afford, but a window longer than `longest_decode`
+        // is decoded worse, and the draft is what the user reads first.
+        let window_samples =
+            duration_to_samples(self.cadence.max_window().min(self.longest_decode()));
         let offset = self.open.len().saturating_sub(window_samples);
         let window = &self.open[offset..];
         if window.is_empty() {
@@ -662,7 +689,7 @@ const CUT_FRAME: usize = 320; // 20 ms
 /// Almost always one piece, untouched. A longer utterance is cut at the
 /// quietest moment in the last two seconds before the limit, so a word is
 /// not sliced in half when a pause was available a little earlier.
-fn split_utterance(start: u64, samples: Vec<f32>, limit: usize) -> Vec<(u64, Vec<f32>)> {
+fn split_utterance(start: u64, samples: &[f32], limit: usize) -> Vec<(u64, &[f32])> {
     if samples.len() <= limit || limit == 0 {
         return vec![(start, samples)];
     }
@@ -671,10 +698,10 @@ fn split_utterance(start: u64, samples: Vec<f32>, limit: usize) -> Vec<(u64, Vec
     let mut at = 0usize;
     while samples.len() - at > limit {
         let cut = at + quietest_cut(&samples[at..at + limit]);
-        pieces.push((start + at as u64, samples[at..cut].to_vec()));
+        pieces.push((start + at as u64, &samples[at..cut]));
         at = cut;
     }
-    pieces.push((start + at as u64, samples[at..].to_vec()));
+    pieces.push((start + at as u64, &samples[at..]));
     pieces
 }
 
@@ -721,7 +748,7 @@ mod split_tests {
     #[test]
     fn a_short_utterance_is_handed_back_whole() {
         let audio = tone_with_a_dip(5.0, 2.5);
-        let pieces = split_utterance(1_000, audio.clone(), 16_000 * 30);
+        let pieces = split_utterance(1_000, &audio, 16_000 * 30);
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].0, 1_000);
         assert_eq!(pieces[0].1.len(), audio.len());
@@ -733,7 +760,7 @@ mod split_tests {
         // dip, not at the 30 s limit where a word might be.
         let audio = tone_with_a_dip(100.0, 29.0);
         let limit = 16_000 * 30;
-        let pieces = split_utterance(0, audio, limit);
+        let pieces = split_utterance(0, &audio, limit);
 
         assert!(pieces.len() >= 4, "{} pieces", pieces.len());
         assert!(pieces.iter().all(|(_, p)| p.len() <= limit), "a piece exceeds the limit");
@@ -752,7 +779,7 @@ mod split_tests {
     fn without_a_quiet_moment_the_cut_falls_near_the_limit() {
         let audio = tone_with_a_dip(65.0, -1.0);
         let limit = 16_000 * 30;
-        let pieces = split_utterance(0, audio, limit);
+        let pieces = split_utterance(0, &audio, limit);
         assert!(pieces.iter().all(|(_, p)| p.len() <= limit));
         assert!(pieces[0].1.len() as f32 / 16_000.0 > 27.9, "the cut stays in the last two seconds");
     }

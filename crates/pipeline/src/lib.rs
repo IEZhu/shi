@@ -22,8 +22,7 @@ pub use asr::{
 pub use cadence::Cadence;
 pub use diarize::{
     Attribution, LiveNames, Span, centroids, cluster, rediarize, DEFAULT_KNOWN_THRESHOLD, DEFAULT_SESSION_THRESHOLD, SessionSlot,
-    SpeakerTracker, Thresholds, VoiceProfile,
-};
+    SpeakerTracker, Thresholds, VoiceProfile, valley_threshold};
 pub use echo::{DEFAULT_ECHO_THRESHOLD, EchoReference};
 pub use preprocess::{Denoiser, Settings as PreprocessSettings};
 pub use engine::{AudioTap, StreamPipeline, VadSettings};
