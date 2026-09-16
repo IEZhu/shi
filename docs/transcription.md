@@ -974,3 +974,71 @@ because trying the next Russian model should cost a download rather than an
 integration. The detector checks the *layout* before the name: T-one's own
 directory is called "…-streaming-t-one-…", which a name check claims for the
 streaming transducer and then fails looking for an encoder that is not there.
+
+## A local language model as a second pass
+
+Three experiments at choosing between hypotheses — voting, splicing, per-utterance
+language routing — were each stopped by the oracle over the N-best list, 15 % and
+18 % here. A *generative* corrector is not bounded by it: it can write a word no
+hypothesis contained, which HyPoradise (NeurIPS 2023) reports as beating the
+re-ranking ceiling, and the closest published analogue to this problem —
+bilingual code-switched speech — adds that a dictionary on top of an LLM beats
+the LLM alone.
+
+`scripts/llm_repair.py` does it: Qwen3-8B through Ollama, one utterance at a
+time, handed the meeting's terms as the only vocabulary it may introduce, with
+anything that drifts more than a third of its words thrown away.
+
+On the corpus it is the largest single win this document records:
+
+| | telephone band | clean |
+|---|---:|---:|
+| Parakeet alone | 21 % | 19 % |
+| \+ learned dictionary | 18 % | 15 % |
+| \+ local LLM | 13 % | 12 % |
+| **\+ dictionary and LLM** | **12 %** | **10 %** |
+
+Below the three-recogniser oracle, which is the point — nothing that chooses
+between hypotheses could have got here.
+
+### Then the real meeting said otherwise
+
+Fifty utterances of the actual recording, and the corpus turns out to have
+flattered it badly. Ten lines were changed. Four are right — "шаргами" became
+"шардами", "ты дает" became "ты даешь". Five are inventions:
+
+| heard | written |
+|---|---|
+| потому что **Елкана**, по продаду, библиотека | потому что **Kibana** |
+| складывают на свою **килерчку** | складывают на свою **Kafka** |
+| **гирки** в руках | **Kibana** в руках |
+
+That meeting runs on an extended metaphor about a library, a warehouse and a
+river. The model forces technical terms into it, because on the corpus every
+sentence really did contain one and substituting was almost always right. The
+prior it learned from the term list does not survive contact with speech that is
+mostly *not* about those terms.
+
+This is the failure Qwen3-ASR was disqualified for, reproduced from the other
+side: a model that writes something fluent when it is unsure. The drift guard
+does not catch it — each of these is a single word in an otherwise untouched
+sentence.
+
+So the pass is **not wired into the app**. What separates it from the dictionary
+is precisely what the dictionary has and it lacks: the dictionary replaces a
+form only because the user replaced that exact form themselves, and it never
+guesses. The guard that would make the LLM safe is a way to know that the
+original word is not already a real Russian word — the same wordlist the
+transliterating glossary needed and this machine still does not have.
+
+The instrument stays. It is one command, it needs Ollama running, and the next
+idea for constraining it can be measured against both numbers above rather than
+argued about.
+
+### Two notes from getting it running
+
+Ollama's manifest host answers fine while its blob storage on Cloudflare R2
+times out from this network, so `ollama pull` cannot complete. Hugging Face
+works if redirects are followed — `curl -L` to the GGUF and `ollama create -f`
+with a one-line Modelfile is the way round it.
+
