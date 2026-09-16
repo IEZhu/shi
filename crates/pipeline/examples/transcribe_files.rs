@@ -45,6 +45,14 @@ fn decoder_with(dir: &std::path::Path, method: &str, paths: i32) -> OfflineRecog
 
 fn detect(dir: &std::path::Path) -> Option<ModelPaths> {
     let has = |name: &str| dir.join(name).is_file();
+
+    // Layout before name: T-one ships one model.onnx and a thirty-five entry
+    // token list, and its own directory is called "…-streaming-t-one-…", which
+    // the name check below would otherwise claim.
+    if has("model.onnx") && has("tokens.txt") && !has("encoder.onnx") && !has("encoder.int8.onnx") {
+        return Some(ModelPaths::tone_ctc(dir));
+    }
+
     if has("tokens.txt")
         && dir
             .file_name()

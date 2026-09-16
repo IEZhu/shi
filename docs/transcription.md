@@ -930,3 +930,47 @@ us, two or three did nearly all the talking". Words per speaker:
 ```
 4409, 1374, 645, 525, 180, 70, 63, 47, 27, 10, 5, 5, 4, 2, 2, 1, 1
 ```
+
+## T-one, and a vocabulary that settles it
+
+T-one is T-Bank's Russian recogniser, released September 2025 and specialised
+for telephony — its published figure is 8.63 % WER on call-centre audio against
+19.39 % for Whisper large-v3. Our meeting *is* telephony, through a Bluetooth
+headset, which is the one domain no model in this document was built for. Worth
+a measurement.
+
+Its `tokens.txt` settles the matter before any audio is decoded. Thirty-five
+entries: a blank, a space, and the thirty-three letters of the Russian
+alphabet. **There is no Latin character in the vocabulary**, so "Kibana" is not
+a word it can emit, in the same way `ё` is not a word Parakeet can emit. It does
+have `ё`, which Parakeet does not.
+
+Measured on the same corpus:
+
+| | overall | ru | en | mix |
+|---|---:|---:|---:|---:|
+| Parakeet v3, clean | **19 %** | 4 % | 6 % | 38 % |
+| GigaAM v3, clean | 36 % | 4 % | 53 % | 40 % |
+| T-one, clean | 59 % | **4 %** | 100 % | 57 % |
+| Parakeet v3, telephone | **21 %** | 8 % | 9 % | 38 % |
+| T-one, telephone | 60 % | **8 %** | 100 % | 57 % |
+
+The English column is what the vocabulary promised: "The broker lost its leader
+partition and the consumer group rebalanced" comes back as "добро казался цлидо
+посещена до консна гру продаланст".
+
+What decides it is the Russian column. T-one **ties** Parakeet at 4 % and 8 %
+rather than beating it, so there is nothing for a router to win even on the
+material it would be routed. That rests on three sentences and about twenty-five
+words, which is thin, so five real Russian utterances from the meeting were
+decoded by both. They trade errors: T-one gets "по большому объему" and
+"свободных" where Parakeet writes "по большого объема" and "свободых"; Parakeet
+gets "во всей этой истории" where T-one drops the preposition. Neither is
+clearly ahead, and T-one returns no punctuation, no capitals, and numbers
+spelled out — "четыреста двадцать девять" for 429.
+
+`ModelPaths::ToneCtc` stays, routed to the online decoder and pinned by a test,
+because trying the next Russian model should cost a download rather than an
+integration. The detector checks the *layout* before the name: T-one's own
+directory is called "…-streaming-t-one-…", which a name check claims for the
+streaming transducer and then fails looking for an encoder that is not there.

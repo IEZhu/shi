@@ -4,7 +4,8 @@ use std::time::Duration;
 use sherpa_onnx::{
     OfflineOmnilingualAsrCtcModelConfig, OfflineQwen3ASRModelConfig, OfflineRecognizer,
     OfflineRecognizerConfig, OfflineTransducerModelConfig, OfflineWhisperModelConfig,
-    OnlineRecognizer, OnlineRecognizerConfig, OnlineTransducerModelConfig,
+    OnlineRecognizer, OnlineRecognizerConfig, OnlineToneCtcModelConfig,
+    OnlineTransducerModelConfig,
 };
 
 use crate::error::{PipelineError, Result};
@@ -64,6 +65,10 @@ pub enum ModelPaths {
         /// "auto" asks it to detect.
         language: Option<String>,
     },
+    /// T-one — one streaming CTC model and a token list. Its vocabulary is
+    /// thirty-five entries: a blank, a space and the thirty-three letters of
+    /// the Russian alphabet. It cannot write a Latin character at all.
+    ToneCtc { model: PathBuf, tokens: PathBuf },
     /// Whisper — encoder and decoder only.
     Whisper {
         encoder: PathBuf,
@@ -145,6 +150,15 @@ impl ModelPaths {
         }
     }
 
+    /// A directory laid out the way sherpa-onnx ships T-one.
+    pub fn tone_ctc(dir: impl AsRef<Path>) -> Self {
+        let dir = dir.as_ref();
+        Self::ToneCtc {
+            model: dir.join("model.onnx"),
+            tokens: dir.join("tokens.txt"),
+        }
+    }
+
     /// A directory laid out the way sherpa-onnx ships Whisper, whose files
     /// carry the size as a prefix: `turbo-encoder.int8.onnx` and so on.
     pub fn whisper_int8(dir: impl AsRef<Path>, prefix: &str) -> Self {
@@ -183,7 +197,8 @@ impl ModelPaths {
                 ("decoder", decoder, Expect::File),
                 ("tokenizer", tokenizer, Expect::Directory),
             ],
-            ModelPaths::OmnilingualCtc { model, tokens } => {
+            ModelPaths::OmnilingualCtc { model, tokens }
+            | ModelPaths::ToneCtc { model, tokens } => {
                 vec![("model", model, Expect::File), ("tokens", tokens, Expect::File)]
             }
             ModelPaths::StreamingTransducer {
@@ -314,10 +329,10 @@ impl SherpaTranscriber {
                 };
                 config.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
             }
-            ModelPaths::StreamingTransducer { .. } => {
+            ModelPaths::StreamingTransducer { .. } | ModelPaths::ToneCtc { .. } => {
                 // Caught here rather than silently producing an empty
-                // recogniser: this model needs the online decoder, and
-                // `load_recognizer` is what routes it there.
+                // recogniser: these models need the online decoder, and
+                // `load_recognizer` is what routes them there.
                 return Err(PipelineError::RecognizerCreateFailed);
             }
             ModelPaths::Whisper {
@@ -482,6 +497,15 @@ mod tests {
     }
 
     #[test]
+    fn t_one_is_recognised_by_its_layout() {
+        // Its own directory is called "…-streaming-t-one-…", so a detector
+        // that goes by name claims it for the streaming transducer and then
+        // fails looking for an encoder that was never there.
+        let dir = laid_out("t-one", &["model.onnx", "tokens.txt"]);
+        assert!(ModelPaths::tone_ctc(&dir).verify().is_ok());
+    }
+
+    #[test]
     fn a_missing_file_is_named_rather_than_guessed_at() {
         let dir = laid_out("incomplete", &["encoder.onnx", "decoder.onnx", "tokens.txt"]);
         let error = ModelPaths::nemo_transducer(&dir).verify().unwrap_err();
@@ -514,30 +538,41 @@ const LANGUAGE_OPTION_KEYS: [&str; 4] = ["language", "target_lang", "lang", "tar
 impl StreamingTranscriber {
     pub fn load(paths: &ModelPaths, threads: i32) -> Result<Self> {
         paths.verify()?;
-        let ModelPaths::StreamingTransducer {
-            encoder,
-            decoder,
-            joiner,
-            tokens,
-            language,
-        } = paths
-        else {
-            return Err(PipelineError::RecognizerCreateFailed);
-        };
 
         let mut config = OnlineRecognizerConfig::default();
         config.model_config.num_threads = threads.max(1);
-        config.model_config.transducer = OnlineTransducerModelConfig {
-            encoder: Some(encoder.to_string_lossy().into_owned()),
-            decoder: Some(decoder.to_string_lossy().into_owned()),
-            joiner: Some(joiner.to_string_lossy().into_owned()),
+
+        let language = match paths {
+            ModelPaths::StreamingTransducer {
+                encoder,
+                decoder,
+                joiner,
+                tokens,
+                language,
+            } => {
+                config.model_config.transducer = OnlineTransducerModelConfig {
+                    encoder: Some(encoder.to_string_lossy().into_owned()),
+                    decoder: Some(decoder.to_string_lossy().into_owned()),
+                    joiner: Some(joiner.to_string_lossy().into_owned()),
+                };
+                config.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
+                language.clone()
+            }
+            ModelPaths::ToneCtc { model, tokens } => {
+                config.model_config.t_one_ctc = OnlineToneCtcModelConfig {
+                    model: Some(model.to_string_lossy().into_owned()),
+                };
+                config.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
+                // Russian letters only; there is no language to choose.
+                None
+            }
+            _ => return Err(PipelineError::RecognizerCreateFailed),
         };
-        config.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
 
         let recognizer =
             OnlineRecognizer::create(&config).ok_or(PipelineError::RecognizerCreateFailed)?;
 
-        let language = language.as_ref().and_then(|value| {
+        let language = language.as_ref().and_then(|value: &String| {
             let probe = recognizer.create_stream();
             let key = LANGUAGE_OPTION_KEYS
                 .iter()
@@ -644,7 +679,7 @@ impl Transcriber for StreamingTranscriber {
 /// should have to make.
 pub fn load_recognizer(paths: &ModelPaths, threads: i32) -> Result<std::sync::Arc<dyn Transcriber>> {
     Ok(match paths {
-        ModelPaths::StreamingTransducer { .. } => {
+        ModelPaths::StreamingTransducer { .. } | ModelPaths::ToneCtc { .. } => {
             std::sync::Arc::new(StreamingTranscriber::load(paths, threads)?)
         }
         _ => std::sync::Arc::new(SherpaTranscriber::load(paths, threads)?),
