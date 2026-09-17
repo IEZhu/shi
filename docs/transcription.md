@@ -1042,3 +1042,58 @@ times out from this network, so `ollama pull` cannot complete. Hugging Face
 works if redirects are followed — `curl -L` to the GGUF and `ollama create -f`
 with a one-line Modelfile is the way round it.
 
+
+## Building the dictionary from a meeting, and what the evidence allows
+
+The dictionary is safe because it only replaces a form the user replaced
+themselves. Filling it automatically throws that away, and the transliterating
+glossary that tried already turned "полка" into "Kafka" — no phonetic threshold
+separates a real word from a mangled one.
+
+A spell checker does. Hunspell with the LibreOffice Russian dictionary accepts
+"полка", "сжатие" and "индексы" and rejects "квка", "тыбаны" and "средпул".
+That is the guard this document has been naming as missing since the glossary
+experiment, and it costs two files and a `brew install`.
+
+`scripts/find_terms.py` uses it: every Cyrillic token the dictionary rejects,
+kept only if it recurs, handed to the local model with the lines it appeared in,
+and **printed rather than written**. The model is asked for an English spelling
+and told to answer "НЕ ТЕРМИН" when unsure, which it does for "саша", "дима",
+"марио" and "гайд".
+
+### The meeting says an automatic dictionary cannot be built
+
+Over the 71-minute recording: 2 292 distinct Cyrillic words, of which the
+dictionary rejects 331 — and **315 of those 331 occur exactly once**.
+
+The manglings are singletons. "елкана", "килерчку", "сферамисть", "шаргами",
+"кавка", "социутопик", "цеберемся": each appears once, so there is no recurrence
+to detect them by, and the correct form can only be guessed from context. This
+is the partial determinism recorded earlier, seen from the other side — the same
+term comes back differently each time, so it never accumulates evidence.
+
+Correcting all 331 by hand would fix 24 further occurrences inside this meeting,
+seven per cent of them. The dictionary's value is across *future* meetings, and
+one meeting cannot measure that.
+
+### What recurrence does find, and why it is not obviously a repair
+
+The sixteen words that do recur are the team's actual vocabulary, and the model
+named seven of them correctly with no inventions:
+
+| heard | proposed | times |
+|---|---|---:|
+| шардов | shard | 7 |
+| секондари | secondary | 3 |
+| дсн | DSN | 3 |
+| консюмер / консимеры / консюмеров | consumer(s) | 2 each |
+| шарды | shard | 2 |
+
+These are not misrecognitions. They are correct Russian renderings of borrowed
+terms, and substituting the English spelling breaks the grammar around them:
+"пятнадцать процентов от всех **шардов**" becomes "от всех **shard**", losing
+the genitive plural. Only the indeclinable ones survive the substitution —
+"в сам **ДСН**" to "в сам **DSN**" reads correctly.
+
+So the finder proposes and a person decides, which is the same rule the
+dictionary itself follows. Nothing here was written to the database.
