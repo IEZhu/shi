@@ -1058,8 +1058,8 @@ experiment, and it costs two files and a `brew install`.
 `scripts/find_terms.py` uses it: every Cyrillic token the dictionary rejects,
 kept only if it recurs, handed to the local model with the lines it appeared in,
 and **printed rather than written**. The model is asked for an English spelling
-and told to answer "НЕ ТЕРМИН" when unsure, which it does for "саша", "дима",
-"марио" and "гайд".
+and told to answer "НЕ ТЕРМИН" when unsure, which it does for first names and
+for ordinary Russian words like "гайд".
 
 ### The meeting says an automatic dictionary cannot be built
 

@@ -8,3 +8,5 @@ node_modules/
 .DS_Store
 ui/dist/
 src-tauri/gen/
+__pycache__/
+*.pyc
