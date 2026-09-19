@@ -27,4 +27,17 @@ if [ ! -d "${MODELS}/${RECOGNISER}" ]; then
   rm -f "${MODELS}/${RECOGNISER}.tar.bz2"
 fi
 
+# The Russian wordlist is what lets scripts/find_terms.py tell a mangled term
+# from a real word — the guard docs/transcription.md spent the whole project
+# asking for. It is a script dependency rather than the app's, but it belongs
+# with the other things a fresh checkout needs.
+if [ ! -f "${MODELS}/hunspell-ru/ru_RU.dic" ]; then
+  echo "fetching the Russian dictionary (3.5 MB)"
+  mkdir -p "${MODELS}/hunspell-ru"
+  for part in ru_RU.dic ru_RU.aff; do
+    curl -fL --retry 3 -o "${MODELS}/hunspell-ru/${part}" \
+      "https://raw.githubusercontent.com/LibreOffice/dictionaries/master/ru_RU/${part}"
+  done
+fi
+
 echo "models ready in ${MODELS}"
